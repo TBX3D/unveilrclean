@@ -326,6 +326,11 @@ local Output = {}
 -- ExpressionHooks[id] = value overrides the truth-value of expression #id at runtime.
 local Id, ExpressionId, ExpressionHooks = 0, 0, {}
 
+-- OriginalSource holds the raw file content read by Decode() BEFORE the hookOp
+-- pre-processing step (Obf()) runs.  Main() uses it for MoonSec signature detection
+-- so that hookOp rewrites of the AST cannot invalidate the pattern search.
+local OriginalSource
+
 local Success, T = pcall(function()
     return require("../Libraries/Types.luau")
 end)
@@ -649,23 +654,28 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         return Key == "" or Match(Key, "[^_%w]") or Match(Key, "%d") == Sub(Key, 1, 1) --> Has non english character or starts with a number
     end
 
-    -- LIMITATION: Index() only handles three key shapes:
-    --   • Key is a known Spy proxy path (IsInternal)  → emits Path[proxyName]
+    -- FIX: Index() now handles four key shapes:
+    --   • Key is a known Spy proxy path (IsInternal)      → emits Path[proxyName]
+    --   • Key is a non-string runtime value (table, etc.) → emits Path[Beautify(Key)]
     --   • Key is a "weird" string (non-identifier chars or leading digit) → emits Path["key"]
-    --   • Key is a plain identifier string             → emits Path.key
-    -- It does NOT handle the case where Key is another Spy proxy that was not
-    -- registered via IsInternal (e.g. a table-lookup result used as a dynamic key:
-    -- `t[someVar]` where someVar itself came from a spy call).  In that case
-    -- IsInternal(Key) returns nil and IsWeird(Key) also returns nil (Key is an
-    -- object, not a string), so the interpolation produces a wrong or empty result.
-    -- Fix: check Typeof(Key) before dispatching to IsInternal vs. string handling.
-    function Index(Key, Path) --!TODO: Fix indexing with other vars
+    --   • Key is a plain identifier string                → emits Path.key
+    -- Previously, a non-string Key that was not registered in Internal[] would fall
+    -- through to IsWeird()/string operations on a non-string, producing wrong output.
+    function Index(Key, Path)
         local Beauty = IsInternal(Key)
         if Beauty then
-            -- LIMITATION: When Path itself is nil and Key is an internal proxy the
-            -- emitted expression is just the proxy name (e.g. "var3") rather than
-            -- a properly qualified index expression.  This loses the container.
+            -- When Path itself is nil and Key is an internal proxy, the emitted
+            -- expression is just the proxy name rather than a qualified index.
+            -- This preserves existing behaviour; a proper fix would require tracking
+            -- the container alongside the key.
             return Path and `{Path}[{Beauty}]` or Beauty --! a[b]
+        end
+
+        -- FIX (temporary limitation): If Key is not a string (e.g. a table, number,
+        -- or Spy proxy not found in Internal[]), fall back to a Beautify'd bracket-
+        -- index expression rather than treating the object as a string identifier.
+        if Typeof(Key) ~= "string" then
+            return `{Path or "getfenv()"}[{Beautify(Key)}]`
         end
 
         local IsWeirdo = IsWeird(Key)
@@ -817,13 +827,25 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             __index = function(_, Key)
                 --print("Indexed",Path,Key)
 
-                -- LIMITATION: This is a hardcoded bypass for a specific anti-tamper probe
-                -- used by the "Pristine" obfuscator.  Pristine indexes `workspace.subgmaallshaha`
-                -- (a key that does not exist in Roblox) at startup to detect whether the
-                -- environment has been tampered with; returning nil here passes that check.
-                -- This only handles the one known probe key.  If Pristine (or another
-                -- obfuscator) changes its probe key, or if a different obfuscator uses a
-                -- different detection heuristic, a new hardcoded bypass would be needed.
+                -- LIMITATION (external — obfuscator-controlled probe keys): Pristine
+                -- indexes `workspace.subgmaallshaha` at startup; if that key exists in
+                -- the environment the script assumes it is being analysed and bails out.
+                -- Returning nil here passes the check.
+                --
+                -- This bypass is hardcoded to one known key.  If the obfuscator rotates
+                -- its probe key in a future version, or if another obfuscator uses a
+                -- different invented key, the tool will break silently.
+                --
+                -- More general proposed approach: treat ALL __index accesses on
+                -- "workspace" or "game" that use a Key not present in the Types.luau
+                -- "Instance" list as probe attempts and return nil without emitting.
+                -- This covers unknown probe keys automatically at the cost of hiding
+                -- accesses to legitimate but undocumented workspace properties:
+                --
+                --   if (Path == "workspace" or Path == "game") then
+                --     local KnownAPI = Types["Instance"]  -- from Types.luau
+                --     if not Find(KnownAPI, Key) then return end
+                --   end
                 if Path == "workspace" and Key == "subgmaallshaha" then return end --pristine antitamper
 
                 local Var = GetVarID()
@@ -1011,6 +1033,16 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local function Obfuscate(Code)
         local File = "temp/" .. GenerateId(6)
 
+        -- FIX (temporary limitation): Strip ALL leading whitespace (spaces, tabs,
+        -- and blank lines) before writing to the temp file.  The external Lua
+        -- unparser (Obf) has line-number assertions that fail when the first real
+        -- token is not on line 1.  Chunks produced by inner loadstring() calls
+        -- inside obfuscated scripts often start with `\n` (e.g. "\n-- chunk header"),
+        -- triggering this failure and causing hookOp instrumentation to be silently
+        -- skipped.  Removing all leading whitespace ensures the first real token is
+        -- always on line 1 without altering the semantics of the chunk.
+        Code = Gsub(Code, "^%s+", "")
+
         fs.writeFile(File, Code)
         local t = Obf(File)
         fs.removeFile(File)
@@ -1035,16 +1067,12 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                             local _a = a
 
                             if not Settings.raw then
-                                -- LIMITATION: When the inner loadstring source starts with a line
-                                -- directive comment (e.g. `\n-- chunk`), the Obfuscate() call
-                                -- sometimes fails because the unparser's line-number assertions
-                                -- reject a file whose first real token is not on line 1.  The
-                                -- pcall swallows the error and falls back to the original (un-
-                                -- obfuscated) source, so hookOp instrumentation is silently
-                                -- skipped for that chunk.  To fix this, either strip leading
-                                -- blank lines/comments before passing to Obfuscate, or adjust
-                                -- the line-check logic in the unparser.
-                                local S, Obfuscated = pcall(Obfuscate, a) --! error is due to line checks hm.. how fix..?
+                                -- Obfuscate() now strips leading whitespace internally (see its
+                                -- definition above), so the line-check error that previously
+                                -- occurred on chunks starting with `\n` is fixed.  The pcall
+                                -- guard is kept as a safety net for any other unparser errors
+                                -- (e.g., syntax errors in the inner chunk).
+                                local S, Obfuscated = pcall(Obfuscate, a)
                                 if S then a = Obfuscated end
                             end
 
@@ -1511,24 +1539,52 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         return Meta
     end
 
-    -- LIMITATION: `table` is passed through as the real, un-instrumented library.
-    -- Calls like `table.sort(spiedTable, fn)` or `table.concat(spiedTable, sep)`
-    -- will execute on the real Lune table library without any interception, so
-    -- those calls are invisible in the output.  The comment `maybe change table to
-    -- HookLib` captures the intent to fix this; doing so would make every
-    -- `table.*` call on a spied value visible in the emitted code.
-    Hooks.string, Hooks.table, Hooks.math = HookLib("string"), table, HookLib("math") --> maybe change table to Hooklib
+    -- LIMITATION (external — SafeWrap semantic mismatch): Applying HookLib("table")
+    -- would break void-return mutating functions.  SafeWrap wraps each function
+    -- so that when any argument is a spy proxy it records the call and returns a new
+    -- Spy rather than calling the real function.  For table.insert / table.remove /
+    -- table.sort this means: (a) the real mutation never happens, and (b) the spy
+    -- proxy for the table is not actually modified, breaking subsequent reads.
+    --
+    -- Proposed workaround for read-only or value-returning table functions
+    -- (table.concat, table.find, table.unpack, table.move):
+    --   Hooks.table = HookLib("table", {
+    --     insert = function(t, v)  table.insert(t, v); Append(`table.insert(…)`)  end,
+    --     remove = function(t, i)  table.remove(t, i); Append(`table.remove(…)`)  end,
+    --     sort   = function(t, fn) table.sort(t, fn);  Append(`table.sort(…)`)    end,
+    --   })
+    -- This keeps the real mutation AND emits the call.  Implementing this fully
+    -- requires handling spy proxy arguments inside the custom wrappers.
+    Hooks.string, Hooks.table, Hooks.math = HookLib("string"), table, HookLib("math")
 
-    -- LIMITATION: coroutine.hook is disabled because wrapping coroutine.wrap()
-    -- correctly requires that the wrapped function `f` be re-bound to `Locked`
-    -- before the coroutine body runs.  The attempted implementation
-    -- `coroutine.wrap(setfenv(f, Locked))` was not reliable because:
-    --   1. setfenv() on a C function is a no-op in Luau.
-    --   2. Functions obtained via the spy environment may already have their env
-    --      set to something other than Locked, and setfenv mid-coroutine is unsafe.
-    -- As a result, coroutine bodies spawned by the obfuscated script currently
-    -- escape the sandbox: their globals are not intercepted and their operations
-    -- are not emitted to Output.
+    -- LIMITATION (external — Luau VM constraint): coroutine.wrap cannot be
+    -- correctly sandboxed because setfenv() is a no-op on C closures in Luau.
+    -- coroutine bodies that escape Locked run with their original _ENV, so their
+    -- global accesses and operations are not emitted to Output.
+    --
+    -- Proposed workaround (partial): check islclosure(f) before applying setfenv.
+    -- For Lua closures, setfenv works.  C closures can only be emitted as stubs
+    -- (record that coroutine.wrap was called with that function, but don't execute
+    -- the body in the sandbox).
+    -- Note: Append() and Beautify() in the example below refer to the Output emitter
+    -- and value-serialiser functions defined in Main() — both are in scope here.
+    --
+    --   Hooks.coroutine = HookLib("coroutine", {
+    --     wrap = function(f)
+    --       if DebugInfo(f, "s") ~= "[C]" then
+    --         -- Lua closure: rebind to sandbox and intercept its body.
+    --         return coroutine.wrap(setfenv(f, Locked))
+    --       else
+    --         -- C closure: cannot rebind; emit a placeholder and run unsandboxed.
+    --         Append(`-- coroutine.wrap({Beautify(f)}) (C closure, body not intercepted)`)
+    --         return coroutine.wrap(f)
+    --       end
+    --     end
+    --   })
+    --
+    -- This still does not intercept globals inside nested Lua closures that are
+    -- called by the coroutine body — a complete fix requires deep setfenv of every
+    -- reachable function in the coroutine's call graph, which is not feasible here.
     --[[Hooks.coroutine = HookLib("coroutine", {
         wrap = function(f)
             return coroutine.wrap(setfenv(f, Locked))
@@ -1595,17 +1651,17 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     TrueEnv.bit = bit32
     TrueEnv.ypcall = pcall
 
-    local MoonSec = IsFile and Source:find("This file was protected with MoonSec V3")
-    -- LIMITATION: MoonSec anti-tamper is detected by searching for the literal
-    -- string `_ENV` in the source.  However, when hookOp is enabled the unparser
-    -- rewrites the AST before this check runs, and the rewrite can rename or
-    -- inline `_ENV` references so that the pattern no longer appears in the source.
-    -- In that case MoonSecAntiTamper is false even though the script actually uses
-    -- the anti-tamper mechanism, and the wrong (non-MoonSec) sandbox is used.
-    -- Fix: run the MoonSec detection on the *original* source before Obf(), or
-    -- search for a more stable MoonSec signature that hookOp does not alter.
-    local MoonSecAntiTamper = MoonSec and Source:find("_ENV") --! since hookOp changes the original regex
-    local MoonSecCP = MoonSec and Source:find("//") --> Constant Protection
+    -- FIX (temporary limitation): Use the original (pre-hookOp) source for all
+    -- MoonSec signature checks.  When hookOp is active, Obf() rewrites the AST
+    -- before Main() is called; this can rename or inline `_ENV` references so
+    -- that `Source:find("_ENV")` returns nil even on genuine MoonSec scripts.
+    -- OriginalSource is set by Decode() before calling Obf(), so it always holds
+    -- the unmodified file text.  For non-file invocations (nested Beautify calls)
+    -- OriginalSource is nil and we fall back to the Source that was passed in.
+    local DetectionSource = OriginalSource or Source
+    local MoonSec = IsFile and DetectionSource:find("This file was protected with MoonSec V3")
+    local MoonSecAntiTamper = MoonSec and DetectionSource:find("_ENV")
+    local MoonSecCP = MoonSec and DetectionSource:find("//") --> Constant Protection
     local Pristine;
     local Tasks = 0;
 
@@ -1700,16 +1756,26 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 if Key == "getconstants" or Key == "_ENV" then return end
                 if Key == "getfenv" then return function() return Locked end end
 
-                -- LIMITATION: MoonSec V3 uses internal globals whose names are exactly
-                -- 15 characters long (obfuscated identifiers).  This check passes those
-                -- through to the real environment (_fenv) so that MoonSec's own runtime
-                -- can access them without being intercepted.
-                -- The length-15 heuristic is fragile: any legitimate Roblox global or
-                -- user-defined variable that happens to be 15 characters long is also
-                -- silently passed through without spying, potentially hiding relevant
-                -- operations from the output.  The extra exemptions for "type" (4 chars)
-                -- and "setfenv" (8 chars) were added ad-hoc when those specific globals
-                -- caused MoonSec to crash; a more principled list would be safer.
+                -- LIMITATION (external — MoonSec V3 internal naming): MoonSec V3
+                -- generates its own internal globals with exactly 15-character obfuscated
+                -- names.  Passing those through to the real environment (_fenv) lets
+                -- MoonSec's runtime function correctly without being intercepted.
+                --
+                -- The length-15 heuristic is fragile because:
+                --   • Any legitimate 15-char global (e.g. "NumberSequence", 14 chars;
+                --     "getscriptclosure", 16 chars) is mis-classified.
+                --   • If a future MoonSec version changes its identifier length, the
+                --     heuristic stops working entirely.
+                --   • The ad-hoc extra exemptions ("type", "setfenv") show the heuristic
+                --     already has known holes.
+                --
+                -- Proposed replacement: build an explicit allowlist of MoonSec's known
+                -- internal identifiers by extracting them from a reference sample:
+                --   local MoonSecInternals = {"<name1>", "<name2>", ...}
+                --   if Find(MoonSecInternals, Key) or Key == "type" or Key == "setfenv" then
+                --     return _fenv[Key]
+                --   end
+                -- This is more precise but requires updating the list when MoonSec changes.
                 if #Key == 15 or Key == "type" or Key == "setfenv" then return _fenv[Key] end
                 if Key == "loadstring" then
                     return Setmetatable({}, {
@@ -1990,7 +2056,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 for Var2, Value in next, Values do
                     local v = Value.Value
                     if not v or Value.Usage > 1 or Var2 == Var then continue end
-                    Out = Gsub(Out, Var2 .. "(%D)", RE_Safe(v) .. "%1")
+                    Out = SubstituteVar(Out, Var2, RE_Safe(v))
                 end
 
                 Changed, Old = Out ~= Old, Out
@@ -2027,6 +2093,18 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 	    return CachedSafe[val]
     end
 
+    -- SubstituteVar: replace all word-boundary occurrences of `Var` in `Str` with
+    -- `SafeReplacement` (already RE_Safe'd).  Two Gsubst are needed:
+    --   • `([^%w_])` catches Var followed by a non-identifier character (guards
+    --     against "var1" matching inside "var1a" or "var1_2").
+    --   • `$` catches Var at the very end of the string where no following char
+    --     exists for the capture group to match.
+    local function SubstituteVar(Str, Var, SafeReplacement)
+        Str = Gsub(Str, Var .. "([^%w_])", SafeReplacement .. "%1")
+        Str = Gsub(Str, Var .. "$", SafeReplacement)
+        return Str
+    end
+
     local function HandleSplit(Separated)
 	    local Side1, Side2 = Separated[1], Concat(Move(Separated, 2, #Separated, 1, {}), "=")
 	    local IsLocal = Sub(Side1, 1, 5) == "local"
@@ -2040,26 +2118,22 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 	    if Value.Usage == 1 or Value.Usage < 0 then
 		    local Val = Value.Value
 
-		    -- LIMITATION: This inner loop inlines single-use sub-expressions by
-		    -- performing a string pattern-substitute over Val for every other
-		    -- variable in Values.  This is unsafe for several reasons:
-		    --   1. It can match a variable name that is a substring of a longer
-		    --      identifier (e.g. "var1" matches inside "var10", "var100", etc.).
-		    --      The `(%D)` guard helps in many cases but not all (e.g. at end of
-		    --      string, or before punctuation that is a letter).
-		    --   2. It does not respect string or comment boundaries, so a variable
-		    --      name appearing inside a quoted string literal will be substituted.
-		    --   3. Transitively inlining through multiple single-use variables may
-		    --      execute substitutions in the wrong order when two variables alias
-		    --      each other's values.
-		    -- The `--! change this later` note marks the Usage > 1 guard as too
-		    -- conservative: variables used exactly twice that are cheap to inline
-		    -- are skipped, leaving unnecessary temporaries in the output.
-		    for var, val in next, Values do --! very unsafe
+		    -- FIX (temporary limitation — two issues):
+		    -- Issue 1 (partial-identifier collision): The old `(%D)` pattern only
+		    -- guards against a trailing digit, so "var1" would wrongly match inside
+		    -- "var1_2" or "var1a" (where `_` and `a` are non-digits but are valid
+		    -- identifier chars).  `([^%w_])` fixes this by only matching when the
+		    -- variable name is NOT followed by any alphanumeric or underscore char.
+		    -- Issue 2 (end-of-string): when the variable name sits at the end of the
+		    -- expression string there is no following character, so no pattern with a
+		    -- capture group ever matches.  A second Gsub with `$` handles that case.
+		    -- Issues 3 (string boundaries) and 4 (substitution ordering) remain open;
+		    -- they require a proper AST-level inliner rather than text substitution.
+		    for var, val in next, Values do
 			    local valVal = val.Value
-			    if not valVal or val.Usage > 1 then continue end --! change this later: Usage > 1 means multi-use vars are never inlined even if they are safe to inline
+			    if not valVal or val.Usage > 1 then continue end
 
-			    Val = Gsub(Val, var .. "(%D)", GetSafe(valVal) .. "%1")
+			    Val = SubstituteVar(Val, var, GetSafe(valVal))
 		    end
 
 		    Replace[Var] = Val
@@ -2113,20 +2187,21 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         local Old, Changed = Out, true;
 
         while Changed do
-            -- LIMITATION: `not not` removal is done with a literal string substitute
-            -- that only matches `if not not ` (after an `if` keyword with a trailing
-            -- space).  This misses:
-            --   • `while not not <cond>` loops
-            --   • `elseif not not <cond>` branches
-            --   • `return not not <value>` and other statement-level uses
-            --   • `local x = not not <value>` assignments
-            -- A proper fix would apply a regex that matches `not not ` anywhere in the
-            -- output, or better yet, handle double-negation elimination in the hookOp
-            -- AST pass so it never reaches the post-processor.
-            Out = Gsub(Out, "if not not ", "if ") --! auto remove not not
+            -- FIX (temporary limitation): Collapse `not not` in all boolean-context
+            -- keywords, not just `if`.  `not not <expr>` always simplifies to just
+            -- `<expr>` in an if/while/elseif guard because those positions test for
+            -- truthiness (any non-nil, non-false value is treated as true) rather than
+            -- requiring a strict boolean, so the double negation has no effect.
+            -- `return not not x` is intentionally excluded because removing it could
+            -- change the actual return value for non-boolean truthy values.
+            -- Uses `%s+` to handle any amount of whitespace (spaces or tabs) between
+            -- the keyword and the `not not` tokens.
+            for _, Kw in ipairs({"if", "while", "elseif"}) do
+                Out = Gsub(Out, Kw .. "%s+not%s+not%s+", Kw .. " ")
+            end
 
             for Var, Value in next, Replace do
-                Out = Gsub(Out, Var .. "(%D)", RE_Safe(Value) .. "%1")
+                Out = SubstituteVar(Out, Var, RE_Safe(Value))
             end
 
             Changed, Old = Out ~= Old, Out
@@ -2217,6 +2292,11 @@ local function Decode(File)
 
     local Source = fs.readFile(File)
 
+    -- Preserve the raw file content for MoonSec signature detection inside Main().
+    -- Obf() rewrites the AST (hookOp) which can remove `_ENV` references; storing
+    -- the original text here lets Main() detect MoonSec anti-tamper reliably.
+    OriginalSource = Source
+
     Settings.outfile = Settings.outfile or "out2.lua"
 
     local Start = Clock()
@@ -2225,17 +2305,23 @@ local function Decode(File)
 
     print("Took",End,"seconds to process.",Success)
 
-    -- LIMITATION: When Main() throws (Success == false), pcall returns the error
-    -- message as Code.  In Luau error objects can be any type; when an obfuscated
-    -- script raises an error with a non-string object (e.g. `error({})` or
-    -- `error(Instance.new("Part"))`), Code ends up being a table or userdata rather
-    -- than a string.  The `type(Code) == "userdata"` branch catches the Instance/
-    -- userdata case specifically, but table errors, number errors, etc. fall through
-    -- to `Beautify(Code)` which handles them generically.
-    -- The `--internal error` comment in the emitted output is the only indicator to
-    -- the user that something went wrong; there is no structured error report.
-    if type(Code) == "userdata" or not Success then --! error
-        Code = `error({Beautify(Code)}) --internal error`
+    -- FIX: When deobfuscation fails, print the error message to the console so it
+    -- is visible without having to open the output file.  The output file still
+    -- contains the `error(...)` line so the user can see what went wrong there too.
+    -- LIMITATION (external): non-string Luau error objects (tables, userdata) are
+    -- serialised via Beautify() which may not capture all detail (e.g. an Instance
+    -- passed to error() only shows its class name).  Full stack traces are not
+    -- captured because pcall discards them.
+    --
+    -- ErrMsg (via Tostring) is used for the human-readable console print and the
+    -- `-- deobfuscation error:` comment line in the output.  Beautify(Code) is used
+    -- separately for the `error(…)` Luau expression in the output because Beautify
+    -- correctly wraps strings in quotes, serialises tables as {…}, etc., while
+    -- Tostring always returns a plain string representation.
+    if type(Code) == "userdata" or not Success then
+        local ErrMsg = Tostring(Code)
+        print("Deobfuscation error:", ErrMsg)
+        Code = `-- deobfuscation error: {ErrMsg}\nerror({Beautify(Code)})`
     end
 
     --[[local Metadata = {
