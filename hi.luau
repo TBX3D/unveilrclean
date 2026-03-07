@@ -600,7 +600,16 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
                 if Return then Body ..= FunctionIndent .. Return .. "\n" end --> return value
 
-                Body, Output, ParamsUsed = Body .. (Indent > 1 and Rep("    ", Indent - 1) or "") .. "end", Old, OldParams --> this just works, i don't know why.
+                -- LIMITATION: The multi-assignment on the next line is doing two things at once:
+                -- (1) It appends "end" (with correct closing indent) to Body.
+                -- (2) It restores the module-level Output and ParamsUsed tables from the
+                --     snapshots taken before this nested Main() call.
+                -- The assignment order in Luau (right-hand side fully evaluated before any
+                -- assignment) means Old/OldParams are read before Output/ParamsUsed are
+                -- overwritten, which makes the restore correct.  Moving this to two separate
+                -- statements would also work but this compact form relies on that evaluation
+                -- order being guaranteed.
+                Body, Output, ParamsUsed = Body .. (Indent > 1 and Rep("    ", Indent - 1) or "") .. "end", Old, OldParams
 
                 return Body
             end,
@@ -640,9 +649,22 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         return Key == "" or Match(Key, "[^_%w]") or Match(Key, "%d") == Sub(Key, 1, 1) --> Has non english character or starts with a number
     end
 
+    -- LIMITATION: Index() only handles three key shapes:
+    --   • Key is a known Spy proxy path (IsInternal)  → emits Path[proxyName]
+    --   • Key is a "weird" string (non-identifier chars or leading digit) → emits Path["key"]
+    --   • Key is a plain identifier string             → emits Path.key
+    -- It does NOT handle the case where Key is another Spy proxy that was not
+    -- registered via IsInternal (e.g. a table-lookup result used as a dynamic key:
+    -- `t[someVar]` where someVar itself came from a spy call).  In that case
+    -- IsInternal(Key) returns nil and IsWeird(Key) also returns nil (Key is an
+    -- object, not a string), so the interpolation produces a wrong or empty result.
+    -- Fix: check Typeof(Key) before dispatching to IsInternal vs. string handling.
     function Index(Key, Path) --!TODO: Fix indexing with other vars
         local Beauty = IsInternal(Key)
         if Beauty then
+            -- LIMITATION: When Path itself is nil and Key is an internal proxy the
+            -- emitted expression is just the proxy name (e.g. "var3") rather than
+            -- a properly qualified index expression.  This loses the container.
             return Path and `{Path}[{Beauty}]` or Beauty --! a[b]
         end
 
@@ -795,6 +817,13 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             __index = function(_, Key)
                 --print("Indexed",Path,Key)
 
+                -- LIMITATION: This is a hardcoded bypass for a specific anti-tamper probe
+                -- used by the "Pristine" obfuscator.  Pristine indexes `workspace.subgmaallshaha`
+                -- (a key that does not exist in Roblox) at startup to detect whether the
+                -- environment has been tampered with; returning nil here passes that check.
+                -- This only handles the one known probe key.  If Pristine (or another
+                -- obfuscator) changes its probe key, or if a different obfuscator uses a
+                -- different detection heuristic, a new hardcoded bypass would be needed.
                 if Path == "workspace" and Key == "subgmaallshaha" then return end --pristine antitamper
 
                 local Var = GetVarID()
@@ -1006,6 +1035,15 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                             local _a = a
 
                             if not Settings.raw then
+                                -- LIMITATION: When the inner loadstring source starts with a line
+                                -- directive comment (e.g. `\n-- chunk`), the Obfuscate() call
+                                -- sometimes fails because the unparser's line-number assertions
+                                -- reject a file whose first real token is not on line 1.  The
+                                -- pcall swallows the error and falls back to the original (un-
+                                -- obfuscated) source, so hookOp instrumentation is silently
+                                -- skipped for that chunk.  To fix this, either strip leading
+                                -- blank lines/comments before passing to Obfuscate, or adjust
+                                -- the line-check logic in the unparser.
                                 local S, Obfuscated = pcall(Obfuscate, a) --! error is due to line checks hm.. how fix..?
                                 if S then a = Obfuscated end
                             end
@@ -1129,6 +1167,14 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         local S = Spy(`{x}({a})`)
         local Type = GetType(GetActualPath(p) or p)
 
+        -- LIMITATION: Only the four Roblox service roots are handled here.
+        -- Any other Instance (e.g. Players, Workspace.Part, script.Parent) that
+        -- reaches this branch will rely solely on GetType() looking up the path
+        -- string in Types.luau.  If the path isn't in Types.luau, GetType() returns
+        -- nil and rawset(S, "V", nil) has no effect, so downstream typeof/type
+        -- comparisons on that spy value fall back to "userdata" by default.
+        -- Fix: replace this hardcoded list with a broader Instance-ancestry check
+        -- or extend Types.luau with all common Instance types.
         if p == "game" or p == "workspace" or p == "Workspace" or p == "Game" then --! hardcoded for now
             if x == "type" then
                 Type = "userdata"
@@ -1295,6 +1341,15 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
             return Condition
         end,
+        -- LIMITATION: When either operand is a Spy proxy that represents loadstring,
+        -- CHECKOR short-circuits and returns the real Loadstring loader directly.
+        -- This is correct for the `loadstring or fallback` pattern, but the early
+        -- return means the or-expression is NOT emitted to Output, so the output
+        -- shows nothing for that line.  The `--! isnt the issue..` note refers to an
+        -- earlier investigation where loadstring appearing nil in Locked.__index was
+        -- blamed on CHECKOR; the actual cause is that CHECKOR returns Loadstring
+        -- before Locked.__index ever gets a chance to handle the "loadstring" key,
+        -- so `Key == "loadstring"` in __index is only hit when CHECKOR is absent.
         CHECKOR = function(a, b) --! isnt the issue..
             local A = IsInternal(a)
             local B = IsInternal(b)
@@ -1456,8 +1511,24 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         return Meta
     end
 
+    -- LIMITATION: `table` is passed through as the real, un-instrumented library.
+    -- Calls like `table.sort(spiedTable, fn)` or `table.concat(spiedTable, sep)`
+    -- will execute on the real Lune table library without any interception, so
+    -- those calls are invisible in the output.  The comment `maybe change table to
+    -- HookLib` captures the intent to fix this; doing so would make every
+    -- `table.*` call on a spied value visible in the emitted code.
     Hooks.string, Hooks.table, Hooks.math = HookLib("string"), table, HookLib("math") --> maybe change table to Hooklib
 
+    -- LIMITATION: coroutine.hook is disabled because wrapping coroutine.wrap()
+    -- correctly requires that the wrapped function `f` be re-bound to `Locked`
+    -- before the coroutine body runs.  The attempted implementation
+    -- `coroutine.wrap(setfenv(f, Locked))` was not reliable because:
+    --   1. setfenv() on a C function is a no-op in Luau.
+    --   2. Functions obtained via the spy environment may already have their env
+    --      set to something other than Locked, and setfenv mid-coroutine is unsafe.
+    -- As a result, coroutine bodies spawned by the obfuscated script currently
+    -- escape the sandbox: their globals are not intercepted and their operations
+    -- are not emitted to Output.
     --[[Hooks.coroutine = HookLib("coroutine", {
         wrap = function(f)
             return coroutine.wrap(setfenv(f, Locked))
@@ -1525,6 +1596,14 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     TrueEnv.ypcall = pcall
 
     local MoonSec = IsFile and Source:find("This file was protected with MoonSec V3")
+    -- LIMITATION: MoonSec anti-tamper is detected by searching for the literal
+    -- string `_ENV` in the source.  However, when hookOp is enabled the unparser
+    -- rewrites the AST before this check runs, and the rewrite can rename or
+    -- inline `_ENV` references so that the pattern no longer appears in the source.
+    -- In that case MoonSecAntiTamper is false even though the script actually uses
+    -- the anti-tamper mechanism, and the wrong (non-MoonSec) sandbox is used.
+    -- Fix: run the MoonSec detection on the *original* source before Obf(), or
+    -- search for a more stable MoonSec signature that hookOp does not alter.
     local MoonSecAntiTamper = MoonSec and Source:find("_ENV") --! since hookOp changes the original regex
     local MoonSecCP = MoonSec and Source:find("//") --> Constant Protection
     local Pristine;
@@ -1584,6 +1663,15 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local SetfenvResult
 
     local ParamCount, Extra = DebugInfo(Function, "a")
+    -- LIMITATION: SpyParams is called with ParamCount + 50 to speculatively create
+    -- spy proxies for extra parameters beyond the declared count.  This is a
+    -- workaround for obfuscated functions that call `debug.getinfo` to obtain their
+    -- own parameter count and then read arguments they were not formally declared
+    -- with (a common anti-analysis trick).  The downside is that 50 extra `arg<N>`
+    -- variables are always created and registered in ParamsUsed; if the function
+    -- genuinely has fewer than ParamCount+50 parameters, the unused arg<N> proxies
+    -- contribute noise.  A smarter fix would detect dynamic arg-count reads and
+    -- generate proxies lazily.
     local Params = {SpyParams(ParamCount + 50)}
 
     if Extra then Insert(Params, Spy("...", { Param=true })) end
@@ -1612,6 +1700,16 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 if Key == "getconstants" or Key == "_ENV" then return end
                 if Key == "getfenv" then return function() return Locked end end
 
+                -- LIMITATION: MoonSec V3 uses internal globals whose names are exactly
+                -- 15 characters long (obfuscated identifiers).  This check passes those
+                -- through to the real environment (_fenv) so that MoonSec's own runtime
+                -- can access them without being intercepted.
+                -- The length-15 heuristic is fragile: any legitimate Roblox global or
+                -- user-defined variable that happens to be 15 characters long is also
+                -- silently passed through without spying, potentially hiding relevant
+                -- operations from the output.  The extra exemptions for "type" (4 chars)
+                -- and "setfenv" (8 chars) were added ad-hoc when those specific globals
+                -- caused MoonSec to crash; a more principled list would be safer.
                 if #Key == 15 or Key == "type" or Key == "setfenv" then return _fenv[Key] end
                 if Key == "loadstring" then
                     return Setmetatable({}, {
@@ -1685,6 +1783,15 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 if Key == "_ENV" then return end
                 if Key == "getfenv" then return function() return Locked end end
 
+                -- LIMITATION: When the obfuscated script uses a `x or loadstring` pattern,
+                -- hookOp emits `CHECKOR(x, loadstring)`.  CHECKOR special-cases the
+                -- "loadstring" path and returns Loadstring directly (see CHECKOR above),
+                -- so `Locked.__index` for the key "loadstring" is only reached when
+                -- loadstring is accessed directly (not via an `or` expression).
+                -- In practice this line is always reachable on direct access, but the
+                -- comment records that there was a period where CHECKOR was suspected of
+                -- returning nil for loadstring in some edge-case and this fallback was
+                -- added as a safety net.
                 if Key == "loadstring" then return Loadstring end --! reason it might be nil sometimes is due to CHECKOR
                 if Key == "load" then return Load end
 
@@ -1742,6 +1849,18 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 local Indexed = Index(Key)
 
                 if IsFunc and not Settings.spy_exec_only then
+                    -- LIMITATION: Function definitions written to the global environment
+                    -- (e.g. `function myFunc() ... end` at the top level of an obfuscated
+                    -- script) are emitted directly into Output[] without calling Append(),
+                    -- which would prefix the line with the current Tab indent string.
+                    -- The intent is that top-level function definitions should always be
+                    -- emitted at zero indent so the output stays readable.
+                    -- However, if __newindex fires while the script is inside a nested
+                    -- scope (NestCount > 0 or CurrentIndent > 0), the function body will
+                    -- still be emitted at indent 0, breaking the visual nesting of the
+                    -- output.  Using `Append()` instead would fix the indenting but would
+                    -- add the Tab prefix to multi-line function bodies, which then look
+                    -- wrong because only the first line gets the prefix.
                     Output[#Output+1] = Beautify(Value, CurrentIndent + 1, {FuncName = Key}); --! By not using append(), we don't add extra tabs.
                     return
                 elseif not IsFunc then
@@ -1921,9 +2040,24 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 	    if Value.Usage == 1 or Value.Usage < 0 then
 		    local Val = Value.Value
 
+		    -- LIMITATION: This inner loop inlines single-use sub-expressions by
+		    -- performing a string pattern-substitute over Val for every other
+		    -- variable in Values.  This is unsafe for several reasons:
+		    --   1. It can match a variable name that is a substring of a longer
+		    --      identifier (e.g. "var1" matches inside "var10", "var100", etc.).
+		    --      The `(%D)` guard helps in many cases but not all (e.g. at end of
+		    --      string, or before punctuation that is a letter).
+		    --   2. It does not respect string or comment boundaries, so a variable
+		    --      name appearing inside a quoted string literal will be substituted.
+		    --   3. Transitively inlining through multiple single-use variables may
+		    --      execute substitutions in the wrong order when two variables alias
+		    --      each other's values.
+		    -- The `--! change this later` note marks the Usage > 1 guard as too
+		    -- conservative: variables used exactly twice that are cheap to inline
+		    -- are skipped, leaving unnecessary temporaries in the output.
 		    for var, val in next, Values do --! very unsafe
 			    local valVal = val.Value
-			    if not valVal or val.Usage > 1 then continue end --! change this later
+			    if not valVal or val.Usage > 1 then continue end --! change this later: Usage > 1 means multi-use vars are never inlined even if they are safe to inline
 
 			    Val = Gsub(Val, var .. "(%D)", GetSafe(valVal) .. "%1")
 		    end
@@ -1979,6 +2113,16 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         local Old, Changed = Out, true;
 
         while Changed do
+            -- LIMITATION: `not not` removal is done with a literal string substitute
+            -- that only matches `if not not ` (after an `if` keyword with a trailing
+            -- space).  This misses:
+            --   • `while not not <cond>` loops
+            --   • `elseif not not <cond>` branches
+            --   • `return not not <value>` and other statement-level uses
+            --   • `local x = not not <value>` assignments
+            -- A proper fix would apply a regex that matches `not not ` anywhere in the
+            -- output, or better yet, handle double-negation elimination in the hookOp
+            -- AST pass so it never reaches the post-processor.
             Out = Gsub(Out, "if not not ", "if ") --! auto remove not not
 
             for Var, Value in next, Replace do
@@ -2081,6 +2225,15 @@ local function Decode(File)
 
     print("Took",End,"seconds to process.",Success)
 
+    -- LIMITATION: When Main() throws (Success == false), pcall returns the error
+    -- message as Code.  In Luau error objects can be any type; when an obfuscated
+    -- script raises an error with a non-string object (e.g. `error({})` or
+    -- `error(Instance.new("Part"))`), Code ends up being a table or userdata rather
+    -- than a string.  The `type(Code) == "userdata"` branch catches the Instance/
+    -- userdata case specifically, but table errors, number errors, etc. fall through
+    -- to `Beautify(Code)` which handles them generically.
+    -- The `--internal error` comment in the emitted output is the only indicator to
+    -- the user that something went wrong; there is no structured error report.
     if type(Code) == "userdata" or not Success then --! error
         Code = `error({Beautify(Code)}) --internal error`
     end
