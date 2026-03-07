@@ -6,18 +6,18 @@
 --* Fix luraph not working with hookop (use the juju.lol script)
 --* Fix that one obfuscator not working
 --* Fix unparser.lua making some scripts detected..? (jayfuscator.txt)
---* Add rawget(self, "V") in comparators (a < b, a > b)
+--* Add rawget(a/b, "V") in comparators (a < b, a > b) -- DONE
 --* Fix indenting
 --* Make elseif also call CHECKIF
 --* add HOOKEXP() which lets you hook a SPECIFIC expression
---* make "not not" get auto removed
---* fix too many operations preventing output from being sent
+--* make "not not" get auto removed -- DONE
+--* fix too many operations preventing output from being sent -- DONE
 --* Maybe fix spy_exec_only by returning a safe env with getfenv() returning the spied env? idk (FIXED)
---* Fix debug.getinfo
+--* Fix debug.getinfo -- DONE
 --* Fix recursive tables (local a = {} a.b = a print(a))
 
 --!TODO: Fix the scripts COMPLETELY breaking when hookop is on with luraph (its the for loops)
---!TODO: Make CHECKAND work
+--!TODO: Make CHECKAND work -- DONE
 --!TODO: Fix unparser breaking scripts/nicuse.lua
 --!TODO: Fix max operations thing not always working
 
@@ -130,9 +130,9 @@ local Top = {
     add_if_comment = false
 }
 
-local Version = "1.0.6"
+local Version = "1.1.0"
 
-local ExecEnv = {"game";"workspace";"script";"Instance";"Enum";"Vector3";"Vector2";"Vector3int16";"Vector2int16";"UDim";"UDim2";"CFrame";"Color3";"BrickColor";"Ray";"Axes";"Faces";"Region3";"Region3int16";"Rect";"NumberRange";"PhysicalProperties";"cache";"cloneref";"compareinstances";"checkcaller";"clonefunction";"getcallingscript";"getscriptclosure";"hookfunction";"iscclosure";"islclosure";"isexecutorclosure";"loadstring";"newcclosure";"rconsoleclear";"rconsolecreate";"rconsoledestroy";"rconsoleinput";"rconsoleprint";"rconsolesettitle";"crypt";"debug";"readfile";"listfiles";"writefile";"makefolder";"appendfile";"isfile";"isfolder";"delfolder";"delfile";"loadfile";"dofile";"isrbxactive";"mouse1click";"mouse1press";"mouse1release";"mouse2click";"mouse2press";"mouse2release";"mousemoveabs";"mousemoverel";"mousescroll";"fireclickdetector";"getcallbackvalue";"getconnections";"getcustomasset";"gethiddenproperty";"sethiddenproperty";"syn";"gethui";"getinstances";"getnilinstances";"isscriptable";"setscriptable";"setrbxclipboard";"getrawmetatable";"hookmetamethod";"getnamecallmethod";"isreadonly";"setrawmetatable";"setreadonly";"identifyexecutor";"lz4compress";"lz4decompress";"messagebox";"request";"setclipboard";"setfpscap";"getgc";"getgenv";"getloadedmodules";"getrenv";"getrunningscripts";"getscriptbytecode";"getscripthash";"getscripts";"getsenv";"getthreadidentity";"setthreadidentity";"Drawing";"isrenderobj";"getrenderproperty";"setrenderproperty";"cleardrawcache";"WebSocket";"getfenv";"coroutine";"math";"string";"table";"os";"utf8";"bit32";"buffer";"TweenInfo";"RaycastParams";"OverlapParams";"Random";"ColorSequence";"ColorSequenceKeypoint";"NumberSequenceKeypoint";"NumberSequence";"SharedTable";"shared";"Font";"elapsedTime";"settings";"tick";"time";"typeof";"UserSettings";"version","warn";"plugin";"shared";"assert";"error";"gcinfo";"getmetatable";"ipairs";"newproxy";"next";"pairs";"pcall";"print";"rawequal";"rawget";"rawlen";"rawset";"require";"select";"setmetatable";"tostring";"unpack";"xpcall";"_G";"_VERSION";"Game","Workspace";"gethwid";"delay"}
+local ExecEnv = {"game";"workspace";"script";"Instance";"Enum";"Vector3";"Vector2";"Vector3int16";"Vector2int16";"UDim";"UDim2";"CFrame";"Color3";"BrickColor";"Ray";"Axes";"Faces";"Region3";"Region3int16";"Rect";"NumberRange";"PhysicalProperties";"cache";"cloneref";"compareinstances";"checkcaller";"clonefunction";"getcallingscript";"getscriptclosure";"hookfunction";"iscclosure";"islclosure";"isexecutorclosure";"loadstring";"newcclosure";"rconsoleclear";"rconsolecreate";"rconsoledestroy";"rconsoleinput";"rconsoleprint";"rconsolesettitle";"crypt";"debug";"readfile";"listfiles";"writefile";"makefolder";"appendfile";"isfile";"isfolder";"delfolder";"delfile";"loadfile";"dofile";"isrbxactive";"mouse1click";"mouse1press";"mouse1release";"mouse2click";"mouse2press";"mouse2release";"mousemoveabs";"mousemoverel";"mousescroll";"fireclickdetector";"getcallbackvalue";"getconnections";"getcustomasset";"gethiddenproperty";"sethiddenproperty";"syn";"gethui";"getinstances";"getnilinstances";"isscriptable";"setscriptable";"setrbxclipboard";"getrawmetatable";"hookmetamethod";"getnamecallmethod";"isreadonly";"setrawmetatable";"setreadonly";"identifyexecutor";"lz4compress";"lz4decompress";"messagebox";"request";"setclipboard";"setfpscap";"getgc";"getgenv";"getloadedmodules";"getrenv";"getrunningscripts";"getscriptbytecode";"getscripthash";"getscripts";"getsenv";"getthreadidentity";"setthreadidentity";"Drawing";"isrenderobj";"getrenderproperty";"setrenderproperty";"cleardrawcache";"WebSocket";"getfenv";"coroutine";"math";"string";"table";"os";"utf8";"bit32";"buffer";"TweenInfo";"RaycastParams";"OverlapParams";"Random";"ColorSequence";"ColorSequenceKeypoint";"NumberSequenceKeypoint";"NumberSequence";"SharedTable";"shared";"Font";"elapsedTime";"settings";"tick";"time";"typeof";"UserSettings";"version","warn";"plugin";"shared";"assert";"error";"gcinfo";"getmetatable";"ipairs";"newproxy";"next";"pairs";"pcall";"print";"rawequal";"rawget";"rawlen";"rawset";"require";"select";"setmetatable";"tostring";"unpack";"xpcall";"_G";"_VERSION";"Game","Workspace";"gethwid";"delay";"getexecutorname";"queue_on_teleport";"fireproximityprompt";"firetouchinterest";"keypress";"keyrelease";"iswindowactive";"saveinstance";"decompile";"setfflag";"rconsoleinfo";"rconsolewarn";"rconsoleerror";"rconsolename";"consolecreate";"consoledestroy";"consoleinput";"consoleprint";"consoleclear";"consolesettitle"}
 
 local newcclosure = function(Function)
     local a = Wrap(function(...)
@@ -198,7 +198,12 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local LoopCount, OpCount = 0, 0
 
     local function OpCountCheck()
-        if OpCount >= Settings.max_ops then print('stopp') error("Too many operations.", 2) end
+        if OpCount >= Settings.max_ops then
+            local OutFile = Settings.outfile or "out2.lua"
+            task.spawn(fs.writeFile, OutFile, Concat(Output, "\n"))
+            print('stopp')
+            error("Too many operations.", 2)
+        end
     end
 
     local Tab = Rep("    ", CurrentIndent)
@@ -476,10 +481,13 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
         local function Arth(Symbol)
             return NewCClosure(function(a, b)
+                local A = IsInternal(a)
+                local B = IsInternal(b)
                 local Value = `{Beautify(a)} {Symbol} {Beautify(b)}`
                 local Var = GetVarID()
 
-                -- add a uhhhh usage += 1 thing here
+                if A then Use(A, "__arth", true) end
+                if B then Use(B, "__arth", true) end
     
                 Append(`local {Var} = {Value}`)
                 Define(Var, Value, "__arth")
@@ -781,8 +789,8 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             local v1, v2 = a, b;
 
             if A or B then
-                if A then Use(A, "__comp", true) v1 = RawGet(a, "V") end
-                if B then Use(B, "__comp", true) v2 = RawGet(b, "V") end
+                if A then Use(A, "__comp", true) v1 = RawGet(a, "V") or a end
+                if B then Use(B, "__comp", true) v2 = RawGet(b, "V") or b end
 
                 return Spy(AddVar("Comp", Symbol, `{A or Beautify(a)} {Symbol} {B or Beautify(b)}`, "__comp"))
             end
@@ -1003,7 +1011,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
             return a or b
         end,
-        CHECKAND = function(a, b) --! Currently having issues with ts (Moonsec) its breaking a few things
+        CHECKAND = function(a, b)
             local A = IsInternal(a)
             local B = IsInternal(b)
 
@@ -1016,16 +1024,34 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 if v1 == nil then v1 = a end
                 if v2 == nil then v2 = b end
 
-                local Var = AddVar("Comp", "And", `{A or Beautify(a)} and {B or Beautify(b)}`, "__comp")
+                local Hook = ExpressionHooks[ExpressionId]
+                local HookExists = Hook ~= nil
 
-                if Settings.hookOpValue == "spy" then
-                    local Return = Spy(Var)
-                    rawset(Return, "V", v1 and v2)
+                local ValueOut;
 
-                    return Return
-                else
-                    return v1 and v2
+                if HookExists then
+                    if Hook ~= "nil" and Hook ~= "spy" then
+                        ValueOut = Hook
+                    else
+                        HookExists = false
+                    end
                 end
+
+                local AndResult = v1 and v2
+
+                if HookExists then
+                    AndResult = ValueOut
+                end
+
+                local Var = AddVar("Comp", "And", `{A or Beautify(a)} and {B or Beautify(b)} --[[expr id {ExpressionId}, hooked: {HookExists}, value: {AndResult}]]`, "__comp")
+                ExpressionId += 1
+
+                if HookExists then return AndResult end
+
+                local Return = Spy(Var)
+                rawset(Return, "V", v1 and v2)
+
+                return Return
             end
 
             return a and b
@@ -1058,7 +1084,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         __NEQ = FastEq("~="),
         __EQ = FastEq("=="),
         CHECKLEN = function(a)
-            local A = IsInternal(A)
+            local A = IsInternal(a)
             local Len = #a
 
             if A then
@@ -1127,6 +1153,12 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     })]]
     Hooks.debug = Setmetatable({
         getinfo = function(thread)
+            local SpiedPath = IsInternal(thread)
+            if SpiedPath then
+                Append(`-- debug.getinfo was called on a spied value: {SpiedPath}`)
+                return {numparams = 0, is_vararg = 0, what = 'C', line = 1}
+            end
+
             if typeof(thread) ~= "function" and typeof(thread) ~= "number" then return {numparams = 1, is_vararg = true, what = 'C', line = 1} end
 
             local line = debug.info(2, "l")
