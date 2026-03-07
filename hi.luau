@@ -1,25 +1,90 @@
 --!christ is lord;
 --! BEFORE YOU READ, MAKE SURE YOU USE PASCALCASE, I DONT WANNA LOOK IN A RANDOM PLACE AND SEE varMtrms = 1
 
---* Work on adding addresses to functions and tables (instead of tostring(string) = "string", make it table: 0xsomething)
---* Fix moonsec constant protection not working (idk how) (i found how)
---* Fix luraph not working with hookop (use the juju.lol script)
---* Fix that one obfuscator not working
---* Fix unparser.lua making some scripts detected..? (jayfuscator.txt)
---* Add rawget(a/b, "V") in comparators (a < b, a > b) -- DONE
---* Fix indenting
---* Make elseif also call CHECKIF
---* add HOOKEXP() which lets you hook a SPECIFIC expression
---* make "not not" get auto removed -- DONE
---* fix too many operations preventing output from being sent -- DONE
---* Maybe fix spy_exec_only by returning a safe env with getfenv() returning the spied env? idk (FIXED)
---* Fix debug.getinfo -- DONE
---* Fix recursive tables (local a = {} a.b = a print(a))
-
---!TODO: Fix the scripts COMPLETELY breaking when hookop is on with luraph (its the for loops)
---!TODO: Make CHECKAND work -- DONE
---!TODO: Fix unparser breaking scripts/nicuse.lua
---!TODO: Fix max operations thing not always working
+--* ══════════════════════════════════════════════════════════════════════
+--* Tasks  (ordered by priority / usefulness, highest first)
+--* ══════════════════════════════════════════════════════════════════════
+--*
+--* ── Completed ─────────────────────────────────────────────────────────
+--* [DONE] make "not not" get auto removed
+--* [DONE] fix too many operations preventing output from being sent
+--* [DONE] Add rawget(a/b, "V") in comparators (a < b, a > b)
+--* [DONE] Maybe fix spy_exec_only by returning a safe env with getfenv() returning the spied env?
+--* [DONE] Fix debug.getinfo
+--* [DONE] Make CHECKAND work
+--* [DONE] Fix indenting (nested for-loops now save/restore Tab relatively)
+--* [DONE] Make elseif also call CHECKIF (added CHECKELSEIF via shared CheckCondition helper)
+--* [DONE] Fix max operations not always working (__newindex now calls OpCountCheck() properly)
+--* [DONE] Fix addresses for functions/tables (GetAddress now prefixes ALL known types)
+--* [DONE] Fix recursive tables (IsRecursive check in Beautify handles all cycle types)
+--*
+--* ── P1 · CRITICAL — complete script breakage on a major obfuscator ────
+--*
+--* [HARD]   Fix luraph not working with hookop + for-loop breakage
+--*          WHY: Luraph is one of the most-used Roblox obfuscators. hookOp currently
+--*               causes scripts to completely break (especially for-loops), so the tool
+--*               produces zero useful output for a huge share of real-world scripts.
+--*          Sub-steps:
+--*            1. [EASY]   Disable hookOp, confirm luraph runs cleanly without it
+--*            2. [EASY]   Isolate a minimal luraph for-loop snippet that reproduces the break
+--*            3. [MEDIUM] Trace how hookOp rewrites numeric vs generic for-loops
+--*            4. [MEDIUM] Identify which hookOp transformation(s) break luraph globally
+--*            5. [MEDIUM] Fix for-loop rewrite in hookOp to preserve semantics
+--*            6. [MEDIUM] Add a broader luraph-compatibility guard in the hookOp transform
+--*            7. [MEDIUM] Test with the juju.lol luraph sample end-to-end
+--*
+--* ── P2 · HIGH — misleading output on another major obfuscator ─────────
+--*
+--* [HARD]   Fix moonsec constant protection not working
+--*          WHY: MoonSec is also extremely common.  Without constant protection the
+--*               decrypted constants are missing from output, making it actively
+--*               misleading rather than merely incomplete.
+--*          Sub-steps:
+--*            1. [EASY]   Verify MoonSecCP flag detection (Source:find("//")) fires correctly
+--*            2. [MEDIUM] Add debug prints to trace which keys the MoonSec CP env indexes
+--*            3. [MEDIUM] Implement constant decryption pass in the MoonSec env branch
+--*            4. [HARD]   Integrate decrypted constants back into the spy output
+--*
+--* ── P3 · HIGH — output safety / tool reliability ──────────────────────
+--*
+--* [HARD]   Fix unparser.lua making some scripts detected (jayfuscator.txt)
+--*          WHY: If the unparser's output triggers anti-cheat / detection, the whole
+--*               point of the tool is undermined for those scripts.
+--*          Sub-steps:
+--*            1. [EASY]   Run jayfuscator.txt through the tool; diff against known-safe output
+--*            2. [MEDIUM] Identify which string literals / identifiers trigger detection
+--*            3. [MEDIUM] Rotate or rename detection-triggering identifiers in the unparser
+--*            4. [MEDIUM] Re-run and confirm the output no longer triggers detection
+--*
+--* ── P4 · MEDIUM — power-user feature (partially done) ─────────────────
+--*
+--* [HARD]   add HOOKEXP() — hook a SPECIFIC expression by ID
+--*          WHY: hookexpr(id, val) already exists; HOOKEXP is the emitted counterpart
+--*               that lets users drive values without touching the source.
+--*          Sub-steps:
+--*            1. [DONE]   hookexpr(id, val) already exists in Hooks for pre-hooking by expression ID
+--*            2. [MEDIUM] Define HOOKEXP(id, callback) that is EMITTED into the generated output
+--*            3. [MEDIUM] Emit `HOOKEXP(expressionId, function() ... end)` at the right call sites
+--*            4. [MEDIUM] Wire the runtime so HOOKEXP callbacks override the expression value
+--*
+--* ── P5 · MEDIUM — reliability for specific scripts ────────────────────
+--*
+--* [MEDIUM] Fix unparser breaking scripts/nicuse.lua
+--*          WHY: A reproducible single-script failure; worth fixing once the higher-priority
+--*               issues are resolved.
+--*          Sub-steps:
+--*            1. [EASY]   Run nicuse.lua through the unparser and capture the exact error/diff
+--*            2. [EASY]   Identify which unparser transformation breaks the script
+--*            3. [MEDIUM] Add a targeted fix or exclusion in the unparser for that pattern
+--*
+--* ── P6 · LOW — needs identification before work can start ──────────────
+--*
+--* [HARD]   Fix that one obfuscator not working
+--*          WHY: Too vague to prioritize further until the obfuscator is identified.
+--*          Sub-steps:
+--*            1. [EASY]   Identify and document which obfuscator it is
+--*            2. [MEDIUM] Reproduce the failure and capture the error/traceback
+--*            3. [HARD]   Fix the env / spy to handle that obfuscator's specific patterns
 
 --* LOCALIZATION:
 
@@ -172,7 +237,7 @@ local function GetActualPath(Path)
 end
 
 local function GetAddress(P, T)
-    local Address = Addresses[P] or Format('%s0x%s', ((T == 'function' or T == 'table') and `{T}: ` or ''), Match(tostring(function()end), "0x([A-Fa-f0-9]+)"))
+    local Address = Addresses[P] or Format('%s0x%s', T and `{T}: ` or '', Match(tostring(function()end), "0x([A-Fa-f0-9]+)"))
 
     Addresses[P] = Address
     return Address
@@ -517,11 +582,11 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             Append(`for {Iv}, {Vv} in {IterFunc} do`)
     
             local Called
-            local Indent = CurrentIndent
-            Tab = Rep("    ", Indent + 1)
+            local PreviousTab = Tab
+            Tab = Tab .. "    "
                 
             return function(_, k) --> if k and key == 'next' that means we're using next()
-                if Called then Tab = Rep("    ", Indent) Append("end") return else Called = true end
+                if Called then Tab = PreviousTab Append("end") return else Called = true end
     
                 return Spy(Iv), Spy(Vv)
             end
@@ -880,6 +945,37 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
     local NextCalls = {}
 
+    local function CheckCondition(Condition, IsElseIf)
+        local Int = IsInternal(Condition)
+        if Int then
+            Top.add_if_comment = true
+
+            local v = RawGet(Condition, "V")
+            local Hook = ExpressionHooks[ExpressionId]
+            local HookExists = Hook ~= nil
+
+            if HookExists then
+                if Hook ~= "nil" and Hook ~= "spy" then
+                    v = Hook
+                end
+            end
+
+            local DidRun = (v == nil or v) and "--[[ i ran ]]" or "--[[ i did not run ]]"
+
+            if IsElseIf then
+                Append(`-- elseif {Int} then {DidRun} --[[expression id {ExpressionId} was hooked: {HookExists}]]\n`)
+            else
+                Append(`if {Int} then {DidRun} end --[[expression id {ExpressionId} was hooked: {HookExists}]]\n`)
+            end
+
+            ExpressionId += 1
+
+            if v == nil then return Condition else return v end
+        end
+
+        return Condition
+    end
+
     local Hooks = {
         hookexpr = function(id, val)
             ExpressionHooks[id] = val
@@ -940,32 +1036,8 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             end
             return Tostring(Str)
         end,
-        CHECKIF = function(Condition)
-            local Int = IsInternal(Condition)
-            if Int then
-                Top.add_if_comment = true
-
-                local v = RawGet(Condition, "V")
-                local Hook = ExpressionHooks[ExpressionId]
-                local HookExists = Hook ~= nil
-
-                if HookExists then
-                    if Hook ~= "nil" and Hook ~= "spy" then
-                        v = Hook
-                    end
-                end
-
-                local DidRun = (v == nil or v) and "--[[ i ran ]]" or "--[[ i did not run ]]"
-                
-                Append(`if {Int} then {DidRun} end --[[expression id {ExpressionId} was hooked: {HookExists}]]\n`)
-
-                ExpressionId += 1
-
-                if v == nil then return Condition else return v end
-            end
-
-            return Condition
-        end,
+        CHECKIF = function(Condition) return CheckCondition(Condition, false) end,
+        CHECKELSEIF = function(Condition) return CheckCondition(Condition, true) end,
         CHECKWHILE = function(Condition)
             if Settings.max_while_count <= LoopCount then
                 Append(`CHECKWHILE({Condition}) -- this was the last call before breaking out of a big while loop.`)
@@ -1422,7 +1494,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
                 OpCount += 1
 
-                if Settings.max_ops <= OpCount then print("Too much") error("Too many operations.") end
+                OpCountCheck()
                 if Settings.spy_exec_only then return end
 
                 local IsFunc = Typeof(Value) == "function"
@@ -1739,7 +1811,7 @@ local function Decode(File)
     Out ..= "]]\n\n"
 
     if Top.add_if_comment then
-        Out ..= "-- When you see an if statement, the only correct thing you see is the first argument, the code after is ALL invalid. (theres an end right after)\n"
+        Out ..= "-- When you see an if/elseif statement, the only correct thing you see is the first argument, the code after is ALL invalid. (theres an end right after)\n"
     end
 
     Out ..= Code
