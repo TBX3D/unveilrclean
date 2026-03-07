@@ -1,65 +1,90 @@
 --!christ is lord;
 --! BEFORE YOU READ, MAKE SURE YOU USE PASCALCASE, I DONT WANNA LOOK IN A RANDOM PLACE AND SEE varMtrms = 1
 
---* Tasks (easiest → hardest):
+--* ══════════════════════════════════════════════════════════════════════
+--* Tasks  (ordered by priority / usefulness, highest first)
+--* ══════════════════════════════════════════════════════════════════════
 --*
+--* ── Completed ─────────────────────────────────────────────────────────
 --* [DONE] make "not not" get auto removed
 --* [DONE] fix too many operations preventing output from being sent
 --* [DONE] Add rawget(a/b, "V") in comparators (a < b, a > b)
---* [DONE] Maybe fix spy_exec_only by returning a safe env with getfenv() returning the spied env? idk
+--* [DONE] Maybe fix spy_exec_only by returning a safe env with getfenv() returning the spied env?
 --* [DONE] Fix debug.getinfo
 --* [DONE] Make CHECKAND work
 --* [DONE] Fix indenting (nested for-loops now save/restore Tab relatively)
 --* [DONE] Make elseif also call CHECKIF (added CHECKELSEIF via shared CheckCondition helper)
 --* [DONE] Fix max operations not always working (__newindex now calls OpCountCheck() properly)
 --* [DONE] Fix addresses for functions/tables (GetAddress now prefixes ALL known types)
---* [DONE] Fix recursive tables (IsRecursive check in Beautify already handles cycles; confirmed working)
+--* [DONE] Fix recursive tables (IsRecursive check in Beautify handles all cycle types)
+--*
+--* ── P1 · CRITICAL — complete script breakage on a major obfuscator ────
+--*
+--* [HARD]   Fix luraph not working with hookop + for-loop breakage
+--*          WHY: Luraph is one of the most-used Roblox obfuscators. hookOp currently
+--*               causes scripts to completely break (especially for-loops), so the tool
+--*               produces zero useful output for a huge share of real-world scripts.
+--*          Sub-steps:
+--*            1. [EASY]   Disable hookOp, confirm luraph runs cleanly without it
+--*            2. [EASY]   Isolate a minimal luraph for-loop snippet that reproduces the break
+--*            3. [MEDIUM] Trace how hookOp rewrites numeric vs generic for-loops
+--*            4. [MEDIUM] Identify which hookOp transformation(s) break luraph globally
+--*            5. [MEDIUM] Fix for-loop rewrite in hookOp to preserve semantics
+--*            6. [MEDIUM] Add a broader luraph-compatibility guard in the hookOp transform
+--*            7. [MEDIUM] Test with the juju.lol luraph sample end-to-end
+--*
+--* ── P2 · HIGH — misleading output on another major obfuscator ─────────
+--*
+--* [HARD]   Fix moonsec constant protection not working
+--*          WHY: MoonSec is also extremely common.  Without constant protection the
+--*               decrypted constants are missing from output, making it actively
+--*               misleading rather than merely incomplete.
+--*          Sub-steps:
+--*            1. [EASY]   Verify MoonSecCP flag detection (Source:find("//")) fires correctly
+--*            2. [MEDIUM] Add debug prints to trace which keys the MoonSec CP env indexes
+--*            3. [MEDIUM] Implement constant decryption pass in the MoonSec env branch
+--*            4. [HARD]   Integrate decrypted constants back into the spy output
+--*
+--* ── P3 · HIGH — output safety / tool reliability ──────────────────────
+--*
+--* [HARD]   Fix unparser.lua making some scripts detected (jayfuscator.txt)
+--*          WHY: If the unparser's output triggers anti-cheat / detection, the whole
+--*               point of the tool is undermined for those scripts.
+--*          Sub-steps:
+--*            1. [EASY]   Run jayfuscator.txt through the tool; diff against known-safe output
+--*            2. [MEDIUM] Identify which string literals / identifiers trigger detection
+--*            3. [MEDIUM] Rotate or rename detection-triggering identifiers in the unparser
+--*            4. [MEDIUM] Re-run and confirm the output no longer triggers detection
+--*
+--* ── P4 · MEDIUM — power-user feature (partially done) ─────────────────
+--*
+--* [HARD]   add HOOKEXP() — hook a SPECIFIC expression by ID
+--*          WHY: hookexpr(id, val) already exists; HOOKEXP is the emitted counterpart
+--*               that lets users drive values without touching the source.
+--*          Sub-steps:
+--*            1. [DONE]   hookexpr(id, val) already exists in Hooks for pre-hooking by expression ID
+--*            2. [MEDIUM] Define HOOKEXP(id, callback) that is EMITTED into the generated output
+--*            3. [MEDIUM] Emit `HOOKEXP(expressionId, function() ... end)` at the right call sites
+--*            4. [MEDIUM] Wire the runtime so HOOKEXP callbacks override the expression value
+--*
+--* ── P5 · MEDIUM — reliability for specific scripts ────────────────────
 --*
 --* [MEDIUM] Fix unparser breaking scripts/nicuse.lua
+--*          WHY: A reproducible single-script failure; worth fixing once the higher-priority
+--*               issues are resolved.
 --*          Sub-steps:
 --*            1. [EASY]   Run nicuse.lua through the unparser and capture the exact error/diff
 --*            2. [EASY]   Identify which unparser transformation breaks the script
 --*            3. [MEDIUM] Add a targeted fix or exclusion in the unparser for that pattern
 --*
---* [HARD]   Fix unparser.lua making some scripts detected..? (jayfuscator.txt)
---*          Sub-steps:
---*            1. [EASY]   Run jayfuscator.txt through the tool; compare output to known-safe output
---*            2. [MEDIUM] Identify which string literals / variable names trigger detection
---*            3. [MEDIUM] Rotate or rename detection-triggering identifiers in the unparser
---*            4. [MEDIUM] Test the fix against the jayfuscator script
---*
---* [HARD]   Fix moonsec constant protection not working
---*          Sub-steps:
---*            1. [EASY]   Verify MoonSecCP flag detection (Source:find("//")) fires correctly
---*            2. [MEDIUM] Add debug prints to trace what the MoonSec CP env indexes
---*            3. [MEDIUM] Implement constant decryption pass in the MoonSec env
---*            4. [HARD]   Integrate decrypted constants back into the spy output
---*
---* [HARD]   Fix luraph not working with hookop (use the juju.lol script)
---*          Sub-steps:
---*            1. [EASY]   Disable hookOp and confirm luraph works without it
---*            2. [MEDIUM] Identify which hookOp transformation breaks luraph (regex, AST rewrite, etc.)
---*            3. [MEDIUM] Add a luraph-compatibility guard in the hookOp transform
---*            4. [MEDIUM] Test with the juju.lol luraph sample
---*
---* [HARD]   Fix scripts COMPLETELY breaking when hookop is on with luraph (for loops)
---*          Sub-steps:
---*            1. [EASY]   Isolate a minimal luraph for-loop snippet that reproduces the break
---*            2. [MEDIUM] Trace how hookOp rewrites the for-loop (numeric vs generic)
---*            3. [MEDIUM] Fix the for-loop rewrite in the unparser/hookOp to preserve semantics
+--* ── P6 · LOW — needs identification before work can start ──────────────
 --*
 --* [HARD]   Fix that one obfuscator not working
+--*          WHY: Too vague to prioritize further until the obfuscator is identified.
 --*          Sub-steps:
 --*            1. [EASY]   Identify and document which obfuscator it is
---*            2. [MEDIUM] Reproduce the failure and capture the error
+--*            2. [MEDIUM] Reproduce the failure and capture the error/traceback
 --*            3. [HARD]   Fix the env / spy to handle that obfuscator's specific patterns
---*
---* [HARD]   add HOOKEXP() which lets you hook a SPECIFIC expression
---*          Sub-steps:
---*            1. [DONE]   hookexpr(id, val) already exists in Hooks for pre-hooking by expression ID
---*            2. [MEDIUM] Define HOOKEXP(id, callback) that is EMITTED into the generated output
---*            3. [MEDIUM] Emit `HOOKEXP(expressionId, function() ... end)` calls in generated output
---*            4. [MEDIUM] Wire the runtime back so the HOOKEXP callback overrides the expression value
 
 --* LOCALIZATION:
 
