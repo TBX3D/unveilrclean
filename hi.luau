@@ -1,25 +1,27 @@
 --!christ is lord;
 --! BEFORE YOU READ, MAKE SURE YOU USE PASCALCASE, I DONT WANNA LOOK IN A RANDOM PLACE AND SEE varMtrms = 1
 
---* Work on adding addresses to functions and tables (instead of tostring(string) = "string", make it table: 0xsomething)
---* Fix moonsec constant protection not working (idk how) (i found how)
---* Fix luraph not working with hookop (use the juju.lol script)
---* Fix that one obfuscator not working
---* Fix unparser.lua making some scripts detected..? (jayfuscator.txt)
---* Add rawget(a/b, "V") in comparators (a < b, a > b) -- DONE
---* Fix indenting
---* Make elseif also call CHECKIF
---* add HOOKEXP() which lets you hook a SPECIFIC expression
---* make "not not" get auto removed -- DONE
---* fix too many operations preventing output from being sent -- DONE
---* Maybe fix spy_exec_only by returning a safe env with getfenv() returning the spied env? idk (FIXED)
---* Fix debug.getinfo -- DONE
---* Fix recursive tables (local a = {} a.b = a print(a))
-
---!TODO: Fix the scripts COMPLETELY breaking when hookop is on with luraph (its the for loops)
---!TODO: Make CHECKAND work -- DONE
---!TODO: Fix unparser breaking scripts/nicuse.lua
---!TODO: Fix max operations thing not always working
+--* Tasks (easiest → hardest):
+--*
+--* [DONE] make "not not" get auto removed
+--* [DONE] fix too many operations preventing output from being sent
+--* [DONE] Add rawget(a/b, "V") in comparators (a < b, a > b)
+--* [DONE] Maybe fix spy_exec_only by returning a safe env with getfenv() returning the spied env? idk
+--* [DONE] Fix debug.getinfo
+--* [DONE] Make CHECKAND work
+--*
+--* [EASY]   Fix indenting (nested for-loops share Tab, so inner loops clobber outer indentation)
+--* [EASY]   Make elseif also call CHECKIF
+--* [MEDIUM] Work on adding addresses to functions and tables (instead of tostring(string) = "string", make it table: 0xsomething)
+--* [MEDIUM] Fix recursive tables (local a = {} a.b = a print(a))
+--* [MEDIUM] Fix max operations thing not always working
+--* [MEDIUM] Fix unparser breaking scripts/nicuse.lua
+--* [HARD]   Fix unparser.lua making some scripts detected..? (jayfuscator.txt)
+--* [HARD]   Fix moonsec constant protection not working (idk how) (i found how)
+--* [HARD]   Fix luraph not working with hookop (use the juju.lol script)
+--* [HARD]   Fix that one obfuscator not working
+--* [HARD]   Fix the scripts COMPLETELY breaking when hookop is on with luraph (its the for loops)
+--* [HARD]   add HOOKEXP() which lets you hook a SPECIFIC expression
 
 --* LOCALIZATION:
 
@@ -517,11 +519,11 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             Append(`for {Iv}, {Vv} in {IterFunc} do`)
     
             local Called
-            local Indent = CurrentIndent
-            Tab = Rep("    ", Indent + 1)
+            local PreviousTab = Tab
+            Tab = Tab .. "    "
                 
             return function(_, k) --> if k and key == 'next' that means we're using next()
-                if Called then Tab = Rep("    ", Indent) Append("end") return else Called = true end
+                if Called then Tab = PreviousTab Append("end") return else Called = true end
     
                 return Spy(Iv), Spy(Vv)
             end
@@ -880,6 +882,37 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
     local NextCalls = {}
 
+    local function CheckCondition(Condition, IsElseIf)
+        local Int = IsInternal(Condition)
+        if Int then
+            Top.add_if_comment = true
+
+            local v = RawGet(Condition, "V")
+            local Hook = ExpressionHooks[ExpressionId]
+            local HookExists = Hook ~= nil
+
+            if HookExists then
+                if Hook ~= "nil" and Hook ~= "spy" then
+                    v = Hook
+                end
+            end
+
+            local DidRun = (v == nil or v) and "--[[ i ran ]]" or "--[[ i did not run ]]"
+
+            if IsElseIf then
+                Append(`-- elseif {Int} then {DidRun} --[[expression id {ExpressionId} was hooked: {HookExists}]]\n`)
+            else
+                Append(`if {Int} then {DidRun} end --[[expression id {ExpressionId} was hooked: {HookExists}]]\n`)
+            end
+
+            ExpressionId += 1
+
+            if v == nil then return Condition else return v end
+        end
+
+        return Condition
+    end
+
     local Hooks = {
         hookexpr = function(id, val)
             ExpressionHooks[id] = val
@@ -940,32 +973,8 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             end
             return Tostring(Str)
         end,
-        CHECKIF = function(Condition)
-            local Int = IsInternal(Condition)
-            if Int then
-                Top.add_if_comment = true
-
-                local v = RawGet(Condition, "V")
-                local Hook = ExpressionHooks[ExpressionId]
-                local HookExists = Hook ~= nil
-
-                if HookExists then
-                    if Hook ~= "nil" and Hook ~= "spy" then
-                        v = Hook
-                    end
-                end
-
-                local DidRun = (v == nil or v) and "--[[ i ran ]]" or "--[[ i did not run ]]"
-                
-                Append(`if {Int} then {DidRun} end --[[expression id {ExpressionId} was hooked: {HookExists}]]\n`)
-
-                ExpressionId += 1
-
-                if v == nil then return Condition else return v end
-            end
-
-            return Condition
-        end,
+        CHECKIF = function(Condition) return CheckCondition(Condition, false) end,
+        CHECKELSEIF = function(Condition) return CheckCondition(Condition, true) end,
         CHECKWHILE = function(Condition)
             if Settings.max_while_count <= LoopCount then
                 Append(`CHECKWHILE({Condition}) -- this was the last call before breaking out of a big while loop.`)
@@ -1739,7 +1748,7 @@ local function Decode(File)
     Out ..= "]]\n\n"
 
     if Top.add_if_comment then
-        Out ..= "-- When you see an if statement, the only correct thing you see is the first argument, the code after is ALL invalid. (theres an end right after)\n"
+        Out ..= "-- When you see an if/elseif statement, the only correct thing you see is the first argument, the code after is ALL invalid. (theres an end right after)\n"
     end
 
     Out ..= Code
