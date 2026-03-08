@@ -262,7 +262,11 @@ local Settings = {
     max_ops = 10_500, -- the max number of operations the script can perform
     max_while_count = 100_000,
     saveFails = false,
-    env_index = false
+    env_index = false,
+    print_env_hits = false,
+    print_spy_hits = false,
+    max_spy_hits = 0,
+    max_bootstrap_seconds = 0
 }
 
 local function StrToValue(Str)
@@ -378,6 +382,45 @@ local function GetType(Name)
     end
 end
 
+--* ── VM Obfuscator Detection ──────────────────────────────────────────
+--* IsLikelyVMObfuscator: heuristic check for VM-interpreter obfuscators.
+--* Scores several signals and returns true only when 3 or more are present.
+--* HasDynamicLoader: returns true when the source contains a dynamic loader
+--* call (loadstring or a bare load() call), which VM obfuscators always use.
+local function IsLikelyVMObfuscator(Source)
+    if Typeof(Source) ~= "string" then
+        return false
+    end
+
+    local NewLines = select(2, Gsub(Source, "\n", ""))
+
+    if #Source < 100_000 or NewLines > 160 then
+        return false
+    end
+
+    local Score = 0
+
+    if Match(Source, "^%s*return%(%{") then Score += 1 end
+    if string.find(Source, "string.pack", 1, true) then Score += 1 end
+    if string.find(Source, "string.unpack", 1, true) then Score += 1 end
+    if string.find(Source, "coroutine.wrap", 1, true) then Score += 1 end
+    if string.find(Source, "table.create", 1, true) then Score += 1 end
+
+    return Score >= 3
+end
+
+local function HasDynamicLoader(Source)
+    if Typeof(Source) ~= "string" then
+        return false
+    end
+
+    if string.find(Source, "loadstring", 1, true) then
+        return true
+    end
+
+    return Match(Source, "^%s*load%s*%(") ~= nil or Match(Source, "[^%w_]load%s*%(") ~= nil
+end
+
 --* ── Main ─────────────────────────────────────────────────────────────
 --* Core dynamic-analysis engine.
 --*
@@ -411,11 +454,17 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
     local LoopCount, OpCount = 0, 0
 
+    local BrokenLoops = {}
+    local LoopHits = {}
+    local EnvHits = {}
+    local SpyHits = {}
+    local ConcreteBootstrap = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and HasDynamicLoader(Source)
+    local BootstrapStartedAt = Clock()
+
     local function OpCountCheck()
         if OpCount >= Settings.max_ops then
             local OutFile = Settings.outfile or "out2.lua"
             task.spawn(fs.writeFile, OutFile, Concat(Output, "\n"))
-            print('stopp')
             error("Too many operations.", 2)
         end
     end
@@ -434,6 +483,46 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         --print("Append", a)
         Output[#Output+1] = Tab .. a
         if Settings.saveFails and Original then task.spawn(fs.writeFile, OutFile, Concat(Output, "\n")) end --> might be VERY horrible but it gets the job done 
+    end
+
+    local function TrackEnvHit(Key)
+        if not Settings.print_env_hits then
+            return
+        end
+
+        EnvHits[Key] = (EnvHits[Key] or 0) + 1
+    end
+
+    local function TrackSpyHit(Path)
+        local HasLimit = Settings.max_spy_hits and Settings.max_spy_hits > 0
+
+        if not Settings.print_spy_hits then
+            if HasLimit then
+                SpyHits[Path] = (SpyHits[Path] or 0) + 1
+
+                if SpyHits[Path] >= Settings.max_spy_hits then
+                    error(`Spy path flood: {Path}`, 2)
+                end
+            end
+
+            return
+        end
+
+        SpyHits[Path] = (SpyHits[Path] or 0) + 1
+
+        if HasLimit and SpyHits[Path] >= Settings.max_spy_hits then
+            error(`Spy path flood: {Path}`, 2)
+        end
+    end
+
+    local function CheckBootstrapTimeout()
+        if not ConcreteBootstrap then
+            return
+        end
+
+        if Settings.max_bootstrap_seconds and Settings.max_bootstrap_seconds > 0 and Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
+            error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
+        end
     end
     --* ── Beautify ──────────────────────────────────────────────────────────
     --* Convert a runtime Lua/Luau value back into a readable source-code string.
@@ -1353,9 +1442,22 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         end,
         CHECKIF = function(Condition) return CheckCondition(Condition, false) end,
         CHECKELSEIF = function(Condition) return CheckCondition(Condition, true) end,
-        CHECKWHILE = function(Condition)
-            if Settings.max_while_count <= LoopCount then
-                Append(`CHECKWHILE({Condition}) -- this was the last call before breaking out of a big while loop.`)
+        CHECKWHILE = function(Condition, LoopId)
+            local LoopKey = LoopId or "__default"
+            local Hits = (LoopHits[LoopKey] or 0) + 1
+
+            LoopHits[LoopKey] = Hits
+            if Settings.max_while_count <= Hits then
+                if Condition == true and LoopId ~= nil then
+                    error(`While loop {LoopId} exceeded max_while_count while its condition stayed true. This script looks like a direct VM interpreter. Raise --max_while_count to probe further or use a VM-specific devirtualizer.`, 0)
+                end
+
+                if not BrokenLoops[LoopKey] then
+                    local LoopSuffix = LoopId ~= nil and `, {Beautify(LoopId)}` or ""
+                    Append(`CHECKWHILE({Condition}{LoopSuffix}) -- this was the last call before breaking out of while loop {Beautify(LoopKey)}.`)
+                    BrokenLoops[LoopKey] = true
+                end
+
                 return false
             end
 
@@ -1668,9 +1770,9 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local EnvValues = {_ENV = {}, bit = {bit32}}
 
     local IterFuncs = {"pairs", "ipairs"}
-    local Funcs = {"newproxy", "select", "setmetatable", "assert", "rawget", "rawset", "xpcall", "unpack", "ypcall", "error", "spawn", "getmetatable"}
+    local Funcs = {"newproxy", "select", "setmetatable", "assert", "rawget", "rawset", "xpcall", "unpack", "ypcall", "error", "spawn", "getmetatable", "next", "print", "rawequal", "rawlen", "require", "type", "typeof", "warn"}
     local WrapFuncs = {"tonumber", "collectgarbage", "tostring", "pcall"}
-    local Tables = {"bit", "bit32", "table", "coroutine"}
+    local Tables = {"bit", "bit32", "buffer", "coroutine", "math", "os", "string", "table", "utf8"}
 
     local Env = {}
 
@@ -1678,6 +1780,10 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     for _, i in Next, WrapFuncs do Env[i] = SafeWrap(TrueEnv[i], i) end
     for _, i in Next, Funcs do Env[i] = TrueEnv[i] end
     for _, i in Next, Tables do Env[i] = TrueEnv[i] end
+
+    if ConcreteBootstrap then
+        Env.debug = TrueEnv.debug
+    end
 
     local Task = Setmetatable({}, {
         __index = function(_, Key)
@@ -1861,6 +1967,18 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 if Key == "loadstring" then return Loadstring end --! reason it might be nil sometimes is due to CHECKOR
                 if Key == "load" then return Load end
 
+                if ConcreteBootstrap then
+                    CheckBootstrapTimeout()
+
+                    if EnvValues[Key] ~= nil then
+                        return EnvValues[Key][1]
+                    end
+
+                    return TrueEnv[Key]
+                end
+
+                TrackEnvHit(Key)
+
                 if Find(IterFuncs, Key) then -- pairs, ipairs
                     return NewCClosure(function(Table)
                         if IsInternal(Table) then
@@ -1871,7 +1989,8 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                     end)
                 end
 
-                local a = EnvValues[Key] or (Pristine and {TrueEnv[Key]} or nil)
+                local HasEnvValue = EnvValues[Key] ~= nil
+                local a = HasEnvValue and EnvValues[Key] or (Pristine and {TrueEnv[Key]} or nil)
                 local Indexed = Index(Key)
 
                 local IsExec = Find(ExecEnv, Key)
@@ -1898,7 +2017,8 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
                     return Spy(Indexed) --> if its not a function or pristine isnt on
                 end
-                
+
+                TrackSpyHit(Key)
                 return Spy(Indexed)
             end,
             __newindex = function(_, Key, Value)
@@ -1963,6 +2083,40 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
     if Original then
         Insert(Output, ReturnValue)
+    end
+
+    if Settings.print_env_hits then
+        local Sorted = {}
+
+        for Key, Count in next, EnvHits do
+            Insert(Sorted, { Key, Count })
+        end
+
+        table.sort(Sorted, function(a, b)
+            return a[2] > b[2]
+        end)
+
+        for i = 1, math.min(15, #Sorted) do
+            local Hit = Sorted[i]
+            warn(`Env hit {i}: {Hit[1]} x{Hit[2]}`)
+        end
+    end
+
+    if Settings.print_spy_hits then
+        local Sorted = {}
+
+        for Path, Count in next, SpyHits do
+            Insert(Sorted, { Path, Count })
+        end
+
+        table.sort(Sorted, function(a, b)
+            return a[2] > b[2]
+        end)
+
+        for i = 1, math.min(15, #Sorted) do
+            local Hit = Sorted[i]
+            warn(`Spy hit {i}: {Hit[1]} x{Hit[2]}`)
+        end
     end
 
     local Out = ""
@@ -2220,20 +2374,24 @@ end
 --* dynamic analysis pass can observe conditional branches.
 --*
 --* Steps performed:
---*   1. Invoke `lua testing/prom/src/cli.lua --LuaU --preset Minify [--hookOp] <Path>`
+--*   1. Invoke `lune cli.lua --LuaU --preset Minify [--hookOp] <Path>`
 --*      The unparser parses the AST and re-emits the script with optional
 --*      hookOp instrumentation (inserts CHECKIF / CHECKAND / CHECKNOT /
 --*      __EQ / __NEQ / CHECKOR / COMPL … calls at every conditional site).
 --*   2. The unparser writes its result to `<Path>.obfuscated.lua`.
 --*   3. Obf() reads that file, deletes it, and returns the content string.
 --*
---* Expected: Path must be a file path (not raw source). The unparser must
---* be present at testing/prom/src/cli.lua and `lua` must be in PATH.
+--* Expected: Path must be a file path (not raw source). The top-level cli.lua
+--* must be present and `lune` (or `lune.exe`) must be in PATH.
+--* If no working Lune runtime is found, Obf() falls back to returning the
+--* raw file contents and logs a warning.
 --* If hookOp is false the CHECKIF/CHECKAND hooks are absent; conditionals
 --* will not be recorded but the script will be less likely to break.
 function Obf(Path)
+    local Source = FileSystem.read(Path)
+
     local Args = {
-        "testing/prom/src/cli.lua",
+        "cli.lua",
         "--LuaU",
         "--preset", "Minify"
     }
@@ -2241,21 +2399,45 @@ function Obf(Path)
     if Settings.hookOp then Insert(Args, "--hookOp") end
 
     Insert(Args, Path)
-    local Out = Process.exec("lua", Args) --> unparser in written in lua, so run it.
 
-    fs.writeFile("Output.txt", Out.stdout)
+    local RuntimeCandidates = {}
 
-    --print("Output:",Out.stdout)
-    warn("Errors:",Out.stderr)
-
-    local Splitted = Split(Path, ".")
-    local Out = Path
-  
-    if Splitted[#Splitted] == "lua" then
-        Out = Concat(Move(Splitted, 1, #Splitted - 1, 1, {}), ".")
+    if fs.isFile("lune.exe") then
+        Insert(RuntimeCandidates, "lune.exe")
+        Insert(RuntimeCandidates, "lune")
+    else
+        Insert(RuntimeCandidates, "lune")
+        Insert(RuntimeCandidates, "lune.exe")
     end
 
-    local FilePath = `{Out}.obfuscated.lua`
+    local Success, Out
+
+    for _, Runtime in next, RuntimeCandidates do
+        Success, Out = pcall(function()
+            return Process.exec(Runtime, Args)
+        end)
+
+        if Success then
+            break
+        end
+    end
+
+    if not Success then
+        warn(`Skipping obfuscation: {Tostring(Out)}. Using raw source.`)
+        return Source
+    end
+
+    fs.writeFile("Output.txt", Out.stdout)
+    warn("Errors:", Out.stderr)
+
+    local Splitted = Split(Path, ".")
+    local OutPath = Path
+
+    if Splitted[#Splitted] == "lua" then
+        OutPath = Concat(Move(Splitted, 1, #Splitted - 1, 1, {}), ".")
+    end
+
+    local FilePath = `{OutPath}.obfuscated.lua`
 
     local Content = FileSystem.read(FilePath)
     fs.removeFile(FilePath)
