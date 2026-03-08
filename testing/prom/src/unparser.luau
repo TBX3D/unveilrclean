@@ -33,7 +33,7 @@ end
 
 -- ── Beautify helpers ─────────────────────────────────────────────────
 
-local maxNum = 2^53   -- safe integer limit for constant folding
+local maxNum = 2^53   -- constant folding limit: results larger than this lose integer precision
 local tab    = "    "
 local visited = {}
 local callId  = ""
@@ -511,7 +511,7 @@ function unparser:readexpr(statement, ...)
         end
 
         local s, value = pcall(getValue, operator, lhs.text or lhs.value, rhs.text or rhs.value)
-        if not s or typeof(value) == "number" and value >= maxNum then
+        if not s or (typeof(value) == "number" and value >= maxNum) then
             return format("%s %s %s", self:readexpr(lhs), operator, self:readexpr(rhs))
         end
         return beautify(value)

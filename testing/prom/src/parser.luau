@@ -70,8 +70,9 @@ local KEYWORDS = {
 local function Tokenise(source)
     local tokens = {}
     local i = 1
-    local line = 0   -- 0-indexed
-    local lineStart = 1  -- byte index of the start of the current line
+    local line = 0   -- 0-indexed line counter (incremented on each \n)
+    local lineStart = 1  -- 1-based byte index of the first character of the current line;
+                         -- column = (i - lineStart), which yields 0-indexed column numbers
 
     local function peekChar(offset)
         offset = offset or 0
@@ -129,7 +130,6 @@ local function Tokenise(source)
         line += nl
         if nl > 0 then
             -- set lineStart to just after the last \n in the consumed range
-            local lastNL = Find(source, "\n[^\n]*$", startContent, false) -- actually easier:
             local pos = startContent
             local last = pos
             while true do
@@ -234,11 +234,12 @@ local function Tokenise(source)
                     advance()
                 end
             end
-            -- Simplified: emit as a plain string with quotestyle "interp"
-            -- The full interpolated-string handling is done as a special case in the parser.
-            -- We restart from iStart to re-lex the content properly.
-            -- For now emit a token that stores the raw source content.
-            local rawContent = Sub(source, iStart, i - 2)  -- everything between backticks (approx)
+            -- Simplified: emit the entire backtick string content as a single STRING token
+            -- with quotestyle="interp".  Expressions inside { } are not parsed individually
+            -- here; the unparser receives the raw content and emits a TEMPLATE_STRING call.
+            -- The end index is approximate: if we broke early (at a '{'), i may point past
+            -- the opening brace, so we clamp to the last character before the current position.
+            local rawContent = Sub(source, iStart, i - 2)  -- content between the backticks
             addToken(TK.STRING, rawContent, {
                 quotestyle = "interp",
                 position = Pos(startLine, startCol),
@@ -594,6 +595,7 @@ local function NewParser(tokens, source)
             local entries = {}
             while not check("}") and not check(TK.EOF) do
                 local entry = {}
+                local nextTok = peek(1)
                 -- [expr] = value  or  name = value  or  value
                 if check("[") then
                     advance()
@@ -601,7 +603,7 @@ local function NewParser(tokens, source)
                     expect("]", "]")
                     expect("=", "=")
                     entry.value = parseExpr()
-                elseif cur().type == TK.NAME and peek(1).text == "=" then
+                elseif cur().type == TK.NAME and nextTok.text == "=" then
                     -- name = value  (only if next token after name is '=', not '==')
                     local keyTok = advance()
                     advance()  -- consume '='
@@ -610,7 +612,7 @@ local function NewParser(tokens, source)
                         quotestyle = "double",
                     })
                     entry.value = parseExpr()
-                elseif cur().type == TK.NAME and peek(1).text == ":" then
+                elseif cur().type == TK.NAME and nextTok.text == ":" then
                     -- name: type  (type annotation in table type context — treat as reference)
                     local keyTok = advance()
                     advance()  -- consume ':'
