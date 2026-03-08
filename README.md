@@ -72,7 +72,9 @@ unveilrclean/             (repository root)
 ├── testing/
 │   └── prom/
 │       └── src/
-│           └── cli.lua        Luau source pre-processor (hookOp unparser)
+│           ├── cli.lua        Text-based source pre-processor (hookOp unparser, Lune)
+│           ├── unparser.luau  AST-based source re-emitter (new, Lune)
+│           └── parser.luau    Luau recursive-descent parser used by unparser.luau
 └── LICENSE
 ```
 
@@ -116,6 +118,25 @@ lune hi.luau myscript.lua --hookOp=false
 # Skip minification and write to a custom output file
 lune hi.luau myscript.lua --minifier=false --outfile=cleaned.lua
 ```
+
+---
+
+### AST-based unparser (unparser.luau)
+
+The new `testing/prom/src/unparser.luau` script is an AST-based alternative to `cli.lua`.
+It parses the input file with `parser.luau` (a Luau recursive-descent parser bundled in
+the same directory) and re-emits all statements with full hookOp instrumentation.
+
+```sh
+lune testing/prom/src/unparser.luau <input> <output> [<callId>] [<constantCollection>]
+```
+
+| Argument | Description |
+|---|---|
+| `<input>` | Path to the Lua/Luau source file to process. |
+| `<output>` | Path where the instrumented output is written. |
+| `<callId>` | Optional prefix string prepended to every CHECK*/CALL*/… call-site (default: none). Pass `"0"` for no prefix. |
+| `<constantCollection>` | Pass `"1"` to enable constant-collection mode (wraps index accesses and string assignments with `GET(…)` / `CONSTRUCT(…)`). |
 
 ---
 
