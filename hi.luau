@@ -276,12 +276,13 @@ end
 for index, arg in Process.args do
     local k, v = Match(arg, "--([%w_]+)=(.+)")
 
-    local Arg = Sub(arg, 3) -- remove --
-
-    if v then -- version=, outfile =
+    if v then -- --key=value flag (e.g. --outfile=out.lua)
         Settings[k] = StrToValue(v)
-    else
+    elseif Sub(arg, 1, 2) == "--" then -- boolean flag (e.g. --hookOp, --raw)
+        local Arg = Sub(arg, 3) -- strip the leading "--"
         Settings[Arg] = true
+    else -- positional argument: treat as the input file path
+        Settings.input = Settings.input or arg
     end
 end
 
@@ -2354,4 +2355,7 @@ local function Decode(File)
     fs.writeFile(Settings.outfile or "out2.lua", Out)
 end
 
-return Decode("input file here")
+assert(Settings.input, "missing input file – pass the path as a positional argument: lune hi.luau <file>")
+assert(fs.isFile(Settings.input), "input file not found: " .. Settings.input)
+
+return Decode(Settings.input)

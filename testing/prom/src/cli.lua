@@ -1,13 +1,61 @@
+--* ══════════════════════════════════════════════════════════════════════
+--* testing/prom/src/cli.lua  –  Luau source pre-processor (unparser)
+--* ══════════════════════════════════════════════════════════════════════
+--*
+--* Reads a Lua/Luau source file, optionally instruments every conditional
+--* and loop with CHECKIF / CHECKWHILE / CHECKOR / CHECKAND / CHECKNOT /
+--* __EQ / __NEQ / COMPL … call-sites (--hookOp mode), then writes the
+--* result to <input>.obfuscated.lua.
+--*
+--* This script is invoked by hi.luau's Obf() function:
+--*
+--*   lua testing/prom/src/cli.lua --LuaU --preset Minify [--hookOp] <input>
+--*
+--* ── Flags ─────────────────────────────────────────────────────────────
+--*
+--*  --hookOp          Rewrite every if/while/elseif condition and every
+--*                    boolean sub-expression so that the spy sandbox can
+--*                    observe branch decisions at runtime.
+--*                    WARNING: breaks some obfuscators (e.g. Luraph).
+--*  --preset <name>   Accepted for compatibility; currently ignored.
+--*  --LuaU            Accepted for compatibility; currently ignored.
+--*  <input>           Path to the Lua/Luau source file to process.
+--*                    Treated as the first non-flag argument.
+--*
+--* ── Output ────────────────────────────────────────────────────────────
+--*
+--*  The processed source is written to:
+--*    • <input>.obfuscated.lua  (if the input path ends in .lua)
+--*    • <input>.obfuscated.lua  (for any other extension)
+--*
+--* ── hookOp call-sites emitted ─────────────────────────────────────────
+--*
+--*  CHECKIF(cond)               – wraps every `if` / `elseif` condition.
+--*  CHECKWHILE(cond, id)        – wraps every `while` condition; `id` is a
+--*                                per-loop integer so CHECKWHILE can cap
+--*                                iterations independently per loop.
+--*  CHECKOR(a, b)               – replaces `a or b`.
+--*  CHECKAND(a, b)              – replaces `a and b`.
+--*  CHECKNOT(a)                 – replaces `not a`.
+--*  __EQ(a, b) / __NEQ(a, b)   – replace `a == b` / `a ~= b`.
+--*  COMPL(a,b) / COMPG(a,b)    – replace `a < b` / `a > b`.
+--*  COMPLE(a,b) / COMPGE(a,b)  – replace `a <= b` / `a >= b`.
+
 local fs = require("@lune/fs")
 local Process = require("@lune/process")
 
 local Find, Match, Rep, Sub = string.find, string.match, string.rep, string.sub
 local Insert, Concat = table.insert, table.concat
 
+-- IsIdentChar: return true when Char is a valid Lua identifier character
+-- (alphanumeric or underscore) and is not the empty string.
 local function IsIdentChar(Char)
     return Char ~= "" and Match(Char, "[%w_]") ~= nil
 end
 
+-- StartsWithKeyword: return true when the exact keyword Keyword appears at
+-- position Index in Source and is surrounded by non-identifier characters
+-- (i.e. it is a whole word, not part of a longer identifier).
 local function StartsWithKeyword(Source, Index, Keyword)
     if Sub(Source, Index, Index + #Keyword - 1) ~= Keyword then
         return false
@@ -19,6 +67,10 @@ local function StartsWithKeyword(Source, Index, Keyword)
     return not IsIdentChar(Prev) and not IsIdentChar(Next)
 end
 
+-- GetLongBracketLevel: if a long-bracket open sequence starts at Index
+-- (e.g. `[[`, `[=[`, `[==[`), return the level (number of `=` signs).
+-- Returns nil if the character at Index is not `[` or the sequence is not
+-- a valid long-bracket opener.
 local function GetLongBracketLevel(Source, Index)
     if Sub(Source, Index, Index) ~= "[" then
         return nil
@@ -37,6 +89,11 @@ local function GetLongBracketLevel(Source, Index)
     return Cursor - Index - 1
 end
 
+-- ReadLongBracketEnd: given that a long-bracket opener begins at Index,
+-- return the index of the final `]` of the matching close sequence.
+-- Returns #Source if no matching close is found (treats the rest of the
+-- source as part of the bracket content, matching Lua's error-tolerant
+-- behaviour for our purposes).
 local function ReadLongBracketEnd(Source, Index)
     local Level = GetLongBracketLevel(Source, Index)
 
@@ -50,6 +107,11 @@ local function ReadLongBracketEnd(Source, Index)
     return EndIndex or #Source
 end
 
+-- ReadCommentEnd: if a comment begins at Index (i.e. `--`), return the
+-- index of the last character of the comment.
+--  • Long comments (`--[[…]]`) end at the matching close bracket.
+--  • Short comments end at the newline (or end-of-file).
+-- Returns nil if there is no comment at Index.
 local function ReadCommentEnd(Source, Index)
     if Sub(Source, Index, Index + 1) ~= "--" then
         return nil
@@ -66,6 +128,9 @@ local function ReadCommentEnd(Source, Index)
     return NewLine and (NewLine - 1) or #Source
 end
 
+-- ReadQuotedStringEnd: given that a quoted string begins at Index (i.e.
+-- the opening `"` or `'`), return the index of the closing quote.
+-- Handles backslash-escape sequences correctly.
 local function ReadQuotedStringEnd(Source, Index)
     local Quote = Sub(Source, Index, Index)
     local Cursor = Index + 1
@@ -85,6 +150,9 @@ local function ReadQuotedStringEnd(Source, Index)
     return #Source
 end
 
+-- ReadStringEnd: if a string literal begins at Index, return the index of
+-- its final character.  Handles single-quoted, double-quoted, and
+-- long-bracket strings.  Returns nil for non-string characters.
 local function ReadStringEnd(Source, Index)
     local Char = Sub(Source, Index, Index)
 
@@ -99,6 +167,10 @@ local function ReadStringEnd(Source, Index)
     return nil
 end
 
+-- FindNextTopLevelKeyword: scan Source forward from StartIndex looking for
+-- the first occurrence of Keyword that is at the top syntactic level
+-- (i.e. not inside parentheses, braces, brackets, strings, or comments).
+-- Returns (matchStart, matchEnd) or nil.
 local function FindNextTopLevelKeyword(Source, StartIndex, Keyword)
     local ParenDepth, BraceDepth, BracketDepth = 0, 0, 0
     local Cursor = StartIndex
@@ -136,6 +208,10 @@ local function FindNextTopLevelKeyword(Source, StartIndex, Keyword)
     return nil
 end
 
+-- FindLastTopLevelKeyword: like FindNextTopLevelKeyword but scans the
+-- entire source and returns the position of the LAST (rightmost) match.
+-- Used by RewriteBooleanExpression to correctly decompose `a or b or c`
+-- right-to-left, preserving Lua's left-associative evaluation order.
 local function FindLastTopLevelKeyword(Source, Keyword)
     local ParenDepth, BraceDepth, BracketDepth = 0, 0, 0
     local Cursor = 1
@@ -174,6 +250,8 @@ local function FindLastTopLevelKeyword(Source, Keyword)
     return MatchStart, MatchEnd
 end
 
+-- SplitPadding: decompose Source into (Leading whitespace, Core content,
+-- Trailing whitespace) so that transformations can preserve indentation.
 local function SplitPadding(Source)
     local Leading = Match(Source, "^(%s*)") or ""
     local Trailing = Match(Source, "(%s*)$") or ""
@@ -187,6 +265,9 @@ local function SplitPadding(Source)
     return Leading, Sub(Source, StartIndex, EndIndex), Trailing
 end
 
+-- HasOuterParens: return true when the entire non-whitespace content of
+-- Source is wrapped in a single matching pair of parentheses.
+-- Example: "  (a or b)  " → true;  "(a) or (b)" → false.
 local function HasOuterParens(Source)
     if Sub(Source, 1, 1) ~= "(" or Sub(Source, #Source, #Source) ~= ")" then
         return false
@@ -222,6 +303,15 @@ local function HasOuterParens(Source)
     return Depth == 0
 end
 
+-- RewriteBooleanExpression: recursively wrap every `or`, `and`, and `not`
+-- operator in Expression with the corresponding CHECK* call so the spy
+-- sandbox can intercept every logical sub-expression at runtime.
+--
+-- Rewrite rules (applied bottom-up / right-to-left):
+--   a or  b  →  CHECKOR(rewrite(a), rewrite(b))
+--   a and b  →  CHECKAND(rewrite(a), rewrite(b))
+--   not a    →  CHECKNOT(rewrite(a))
+--   (expr)   →  (rewrite(expr))          ← outer parens are preserved
 local function RewriteBooleanExpression(Expression)
     local Leading, Core, Trailing = SplitPadding(Expression)
 
@@ -259,6 +349,12 @@ local function RewriteBooleanExpression(Expression)
     return Leading .. Core .. Trailing
 end
 
+-- WrapCondition: wrap the condition Expression in a HookName(...) call
+-- (e.g. CHECKIF, CHECKWHILE) and recursively rewrite any boolean
+-- sub-expressions inside it.  If ExtraArgument is provided it is appended
+-- as an additional argument (used to pass the while-loop ID to CHECKWHILE).
+-- Idempotent: if the expression is already a HookName(…) call, it is
+-- returned unchanged.
 local function WrapCondition(Expression, HookName, ExtraArgument)
     local Leading, Core, Trailing = SplitPadding(Expression)
 
@@ -283,6 +379,12 @@ local function WrapCondition(Expression, HookName, ExtraArgument)
     return Leading .. HookName .. "(" .. Args .. ")" .. Trailing
 end
 
+-- TransformControlFlow: walk Source character-by-character and replace
+-- every `if`, `elseif`, and `while` condition with a WrapCondition call.
+-- Strings, comments, and nested bracket depths are tracked so that
+-- keywords inside literals are not rewritten.
+--
+-- Returns the fully instrumented source string.
 local function TransformControlFlow(Source)
     local Output = {}
     local Cursor = 1
@@ -335,6 +437,14 @@ local function TransformControlFlow(Source)
     return Concat(Output)
 end
 
+-- ParseArgs: parse Process.args into a Settings table.
+--
+-- Recognised flags:
+--   --hookOp         → Settings.hookOp = true
+--   --preset <name>  → skip the next argument (value is ignored)
+--   --<anything>     → accepted silently for forward compatibility
+--   <other>          → treated as the positional input file path
+--                      (first non-flag argument wins)
 local function ParseArgs()
     local Settings = {
         hookOp = false
@@ -362,6 +472,9 @@ local function ParseArgs()
     return Settings
 end
 
+-- GetOutputPath: derive the output file path from the input path.
+-- Strips a trailing .lua extension before appending .obfuscated.lua so
+-- that `foo.lua` → `foo.obfuscated.lua` rather than `foo.lua.obfuscated.lua`.
 local function GetOutputPath(Path)
     if Path:match("%.lua$") then
         return Path:gsub("%.lua$", "") .. ".obfuscated.lua"
