@@ -300,6 +300,33 @@ Test("obfuscated.lua: ops-flood error is not present", function()
         "Ops-flood error pattern found in output — PureVMObfuscator ops skipping is broken")
 end)
 
+-- Verify that the output header contains the time_taken metadata.
+Test("obfuscated.lua: output contains time_taken metadata", function()
+    local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", LuraphFlags)
+    Assert(Result.ok, "hi.luau exited with error: " .. Result.stderr)
+    AssertContains(Output, "time_taken")
+end)
+
+-- Verify that PureVM auto-detection works without manually passing --hookOp=false.
+-- The Obf() function should detect the PureVM obfuscator and automatically disable
+-- hookOp, so the tool should succeed even when hookOp is not explicitly disabled.
+Test("obfuscated.lua: PureVM auto-detection disables hookOp automatically", function()
+    local AutoFlags = {"--max_bootstrap_seconds=5"}
+    local Result = RunHiFile(RepoRoot .. "/obfuscated.lua", AutoFlags)
+    Assert(Result.ok, "hi.luau exited with error when relying on PureVM auto-detection: " .. Result.stderr)
+end)
+
+-- Verify that output does not contain raw obfuscated bytecode tables from the
+-- input.  If the VM dispatch table constants leak into the output, the
+-- deobfuscator is not intercepting properly.
+-- Note: "0X6614" uses uppercase X to match the exact literal in obfuscated.lua.
+Test("obfuscated.lua: output does not contain raw VM dispatch patterns", function()
+    local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", LuraphFlags)
+    Assert(Result.ok, "hi.luau exited with error: " .. Result.stderr)
+    AssertNotContains(Output, "0X6614")
+    AssertNotContains(Output, "bit32.rrotate")
+end)
+
 -- ── Summary ───────────────────────────────────────────────────────────
 
 print(string.format("\nhi.luau tests: %d passed, %d failed", Passed, Failed))

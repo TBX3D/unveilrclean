@@ -489,13 +489,15 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     -- max_while_count iterations, producing no useful output.
     local IsPureVMObfuscator = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source)
     local ConcreteBootstrap = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and HasDynamicLoader(Source)
-    local PureVM = Settings.spy_exec_only and IsPureVMObfuscator(Source)
+    -- Legacy aliases: earlier iterations of PureVM support used different names.
+    local PureVM = IsPureVMObfuscator
+    local PureVMObfuscator = IsPureVMObfuscator
     local BootstrapStartedAt = Clock()
 
     -- PureVM obfuscators (e.g. Luraph without loadstring) have no transition
     -- point where the bootstrap ends.  Apply a default timeout and raise the
     -- operation cap so the VM can finish executing before we hit the limit.
-    if PureVM then
+    if IsPureVMObfuscator then
         if not Settings.max_bootstrap_seconds or Settings.max_bootstrap_seconds == 0 then
             Settings.max_bootstrap_seconds = 30
         end
@@ -505,20 +507,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             Settings.max_ops = 500_000
         end
         print("PureVM obfuscator detected – hookOp disabled, bootstrap timeout set to", Settings.max_bootstrap_seconds, "s")
-    -- PureVMObfuscator: a VM obfuscator whose entire payload is encoded inline
-    -- (e.g. Luraph) and that never calls loadstring from the sandboxed env.
-    -- For these scripts every global lookup is either an ExecEnv Roblox API call
-    -- (meaningful, should be intercepted) or a VM-internal lookup that returns nil
-    -- and should NOT exhaust max_ops.  Ops are only charged when the key resolves
-    -- to a spied ExecEnv global so the VM bootstrap does not burn the budget.
-    local PureVMObfuscator = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source)
-    local BootstrapStartedAt = Clock()
-
-    -- Apply a default 30 s execution cap for PureVM scripts so that a looping
-    -- dispatch table does not run forever when the user has not explicitly set
-    -- --max_bootstrap_seconds.  The user can raise or lower it via the flag.
-    if IsPureVMObfuscator and Settings.max_bootstrap_seconds == 0 then
-        Settings.max_bootstrap_seconds = 30
     end
 
     local function OpCountCheck()
@@ -586,16 +574,11 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     end
 
     local function CheckBootstrapTimeout()
-        if not ConcreteBootstrap and not PureVM then
         if not ConcreteBootstrap and not IsPureVMObfuscator then
             return
         end
 
         if Settings.max_bootstrap_seconds and Settings.max_bootstrap_seconds > 0 and Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
-            if PureVM then
-                error(`PureVM bootstrap timed out after {Settings.max_bootstrap_seconds}s. The VM interpreter is too slow to complete in Lune. Try increasing --max_bootstrap_seconds or use a VM-specific devirtualizer.`, 0)
-            else
-                error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
             if ConcreteBootstrap then
                 error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
             else
@@ -2089,11 +2072,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             __index = function(_, Key)
                 --print(Key)
 
-                -- PureVM: only count operations for exec-global accesses (the
-                -- ones we actually spy on).  Non-exec accesses are the VM
-                -- bootstrap performing thousands of lookups which should not
-                -- consume the operation budget.
-                if not PureVM then
                 -- PureVM obfuscators (e.g. Luraph) run their entire interpreter loop
                 -- through this __index.  Counting every global read against max_ops
                 -- exhausts the budget within a handful of VM instructions, producing no
@@ -2148,7 +2126,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 -- bootstrap, but Roblox API accesses (game, workspace, …) are
                 -- still intercepted via Spy so the output captures what the
                 -- original script was doing.
-                if PureVM then
+                if IsPureVMObfuscator then
                     CheckBootstrapTimeout()
 
                     if EnvValues[Key] ~= nil then
@@ -2168,11 +2146,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                     end
 
                     return nil
-                -- PureVM obfuscators (e.g. Luraph) never call loadstring; their entire
-                -- interpreter runs transparently.  Apply the time-based execution cap so
-                -- a stuck VM loop doesn't run forever.
-                if IsPureVMObfuscator then
-                    CheckBootstrapTimeout()
                 end
 
                 TrackEnvHit(Key)
@@ -2629,17 +2602,9 @@ function Obf(Path)
     -- survive CHECKIF/CHECKWHILE injection).  Automatically skip hookOp
     -- for these scripts so the user does not have to pass --hookOp=false.
     if IsPureVMObfuscator(Source) then
-        return Source
-    -- FIX (PureVM / Luraph): Automatically disable hookOp when the source is a
-    -- VM obfuscator that embeds its own interpreter and never calls loadstring.
-    -- hookOp wraps every `while … do` with CHECKWHILE; after max_while_count
-    -- iterations CHECKWHILE returns false and terminates the dispatch loop,
-    -- producing zero useful output.  Disabling hookOp lets the loop run freely
-    -- while the spy still intercepts every global access made by the deobfuscated
-    -- bytecode.
-    if Settings.hookOp and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source) then
         warn("PureVM obfuscator detected (no loadstring/load call). Automatically disabling --hookOp to preserve the VM dispatch loop.")
         Settings.hookOp = false
+        return Source
     end
 
     -- FIX: Use `lune run testing/prom/src/cli.lua` (the correct sub-command and
