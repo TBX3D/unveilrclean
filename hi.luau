@@ -261,6 +261,10 @@ local FileSystem = {
 --*  env_index     (bool)   Emit a `local _ = <name>` line every time the
 --*                         sandboxed script reads an untracked global. Useful
 --*                         for debugging which globals a script accesses.
+--*  purevm_timeout (number) Alias for max_bootstrap_seconds, intended for
+--*                          PureVM / Luraph scripts.  When the timeout fires
+--*                          the output comment includes how many VM opcodes
+--*                          were executed so you know whether to increase it.
 local Settings = {
     hookOpValue = "spy",
     hookOp = true,
@@ -278,8 +282,12 @@ local Settings = {
     max_spy_hits = 0,
     -- 0 = disabled (no cap).  For PureVM obfuscators (Luraph-style, no loadstring)
     -- this is automatically raised to 5 s so a stuck dispatch loop cannot run
-    -- forever.  Override with --max_bootstrap_seconds=<n>.
-    max_bootstrap_seconds = 0
+    -- forever.  Override with --max_bootstrap_seconds=<n> or --purevm_timeout=<n>.
+    max_bootstrap_seconds = 0,
+    -- Alias for max_bootstrap_seconds: --purevm_timeout=<n> sets the PureVM timeout
+    -- in seconds.  Whichever of the two is non-zero takes effect; if both are set,
+    -- max_bootstrap_seconds wins.
+    purevm_timeout = 0
 }
 
 local function StrToValue(Str)
@@ -290,24 +298,37 @@ local function StrToValue(Str)
     else return Str end
 end
 
+-- ExplicitFlags tracks which Settings keys were explicitly passed on the command
+-- line.  Used below to implement correct precedence for flag aliases.
+local ExplicitFlags = {}
+
 for index, arg in Process.args do
     local k, v = Match(arg, "--([%w_]+)=(.+)")
 
     if v then -- --key=value flag (e.g. --outfile=out.lua)
         Settings[k] = StrToValue(v)
+        ExplicitFlags[k] = true
     elseif Sub(arg, 1, 2) == "--" then -- boolean flag (e.g. --hookOp, --raw)
         local Arg = Sub(arg, 3) -- strip the leading "--"
         Settings[Arg] = true
+        ExplicitFlags[Arg] = true
     else -- positional argument: treat as the input file path
         Settings.input = Settings.input or arg
     end
+end
+
+-- Apply the --purevm_timeout alias: use it as max_bootstrap_seconds only when
+-- max_bootstrap_seconds was not explicitly provided on the command line.
+-- This ensures --max_bootstrap_seconds always takes priority when both are given.
+if Settings.purevm_timeout > 0 and not ExplicitFlags.max_bootstrap_seconds then
+    Settings.max_bootstrap_seconds = Settings.purevm_timeout
 end
 
 local Top = {
     add_if_comment = false
 }
 
-local Version = "1.1.0"
+local Version = "1.2.0"
 
 local ExecEnv = {"game";"workspace";"script";"Instance";"Enum";"Vector3";"Vector2";"Vector3int16";"Vector2int16";"UDim";"UDim2";"CFrame";"Color3";"BrickColor";"Ray";"Axes";"Faces";"Region3";"Region3int16";"Rect";"NumberRange";"PhysicalProperties";"cache";"cloneref";"compareinstances";"checkcaller";"clonefunction";"getcallingscript";"getscriptclosure";"hookfunction";"iscclosure";"islclosure";"isexecutorclosure";"loadstring";"newcclosure";"rconsoleclear";"rconsolecreate";"rconsoledestroy";"rconsoleinput";"rconsoleprint";"rconsolesettitle";"crypt";"debug";"readfile";"listfiles";"writefile";"makefolder";"appendfile";"isfile";"isfolder";"delfolder";"delfile";"loadfile";"dofile";"isrbxactive";"mouse1click";"mouse1press";"mouse1release";"mouse2click";"mouse2press";"mouse2release";"mousemoveabs";"mousemoverel";"mousescroll";"fireclickdetector";"getcallbackvalue";"getconnections";"getcustomasset";"gethiddenproperty";"sethiddenproperty";"syn";"gethui";"getinstances";"getnilinstances";"isscriptable";"setscriptable";"setrbxclipboard";"getrawmetatable";"hookmetamethod";"getnamecallmethod";"isreadonly";"setrawmetatable";"setreadonly";"identifyexecutor";"lz4compress";"lz4decompress";"messagebox";"request";"setclipboard";"setfpscap";"getgc";"getgenv";"getloadedmodules";"getrenv";"getrunningscripts";"getscriptbytecode";"getscripthash";"getscripts";"getsenv";"getthreadidentity";"setthreadidentity";"Drawing";"isrenderobj";"getrenderproperty";"setrenderproperty";"cleardrawcache";"WebSocket";"getfenv";"coroutine";"math";"string";"table";"os";"utf8";"bit32";"buffer";"TweenInfo";"RaycastParams";"OverlapParams";"Random";"ColorSequence";"ColorSequenceKeypoint";"NumberSequenceKeypoint";"NumberSequence";"SharedTable";"shared";"Font";"elapsedTime";"settings";"tick";"time";"typeof";"UserSettings";"version","warn";"plugin";"shared";"assert";"error";"gcinfo";"getmetatable";"ipairs";"newproxy";"next";"pairs";"pcall";"print";"rawequal";"rawget";"rawlen";"rawset";"require";"select";"setmetatable";"tostring";"unpack";"xpcall";"_G";"_VERSION";"Game","Workspace";"gethwid";"delay";"getexecutorname";"queue_on_teleport";"fireproximityprompt";"firetouchinterest";"keypress";"keyrelease";"iswindowactive";"saveinstance";"decompile";"setfflag";"rconsoleinfo";"rconsolewarn";"rconsoleerror";"rconsolename";"consolecreate";"consoledestroy";"consoleinput";"consoleprint";"consoleclear";"consolesettitle"}
 
@@ -513,6 +534,13 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         print("PureVM obfuscator detected – hookOp disabled, bootstrap timeout set to", Settings.max_bootstrap_seconds, "s")
     end
 
+    -- PcallCount tracks how many times the sandboxed pcall wrapper was invoked
+    -- during PureVM execution.  Luraph-style VMs dispatch each bytecode opcode
+    -- through pcall, so this approximates the number of VM instructions executed.
+    -- Reported in the timeout comment to help users decide whether to raise
+    -- --purevm_timeout / --max_bootstrap_seconds.
+    local PcallCount = 0
+
     local function OpCountCheck()
         if OpCount >= Settings.max_ops then
             local OutFile = Settings.outfile or "out2.lua"
@@ -587,7 +615,9 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             if ConcreteBootstrap then
                 error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
             else
-                error(`PureVM execution timed out after {Settings.max_bootstrap_seconds}s. Partial output was saved.`, 0)
+                -- Include the pcall iteration count so users know how far the VM
+                -- got.  To run longer use --purevm_timeout=<seconds>.
+                error(`PureVM execution timed out after {Settings.max_bootstrap_seconds}s (~{PcallCount} VM opcodes). Use --purevm_timeout=<seconds> to allow more time.`, 0)
             end
         end
     end
@@ -1908,6 +1938,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     if PureVMObfuscator then
         local BasePcall = Env["pcall"]
         Env["pcall"] = CreateFunction(function(...)
+            PcallCount += 1
             CheckBootstrapTimeout()
             return BasePcall(...)
         end, "pcall")
@@ -2291,7 +2322,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             if Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
                 debug.sethook()
                 BootstrapTimedOut = true
-                error(`PureVM execution timed out after {Settings.max_bootstrap_seconds}s. Partial output was saved.`, 0)
+                error(`PureVM execution timed out after {Settings.max_bootstrap_seconds}s (~{PcallCount} VM opcodes). Use --purevm_timeout=<seconds> to allow more time.`, 0)
             end
         end, "", 10000)
         PureVMHookActive = true

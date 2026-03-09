@@ -102,7 +102,8 @@ The deobfuscated output is written to `out2.lua` (or the path set by
 | `--raw=<bool>` | `false` | Skip the hookOp pre-processing step entirely. |
 | `--max_ops=<number>` | `10500` | Hard cap on intercepted operations (prevents runaway scripts). |
 | `--max_while_count=<number>` | `100000` | Separate cap for while-loop iterations. |
-| `--max_bootstrap_seconds=<number>` | `0` (30 for PureVM) | Time limit in seconds for VM-obfuscated script execution. Automatically set to 30 s for PureVM scripts (no `loadstring`); 0 means unlimited. |
+| `--max_bootstrap_seconds=<number>` | `0` (5 for PureVM) | Time limit in seconds for VM-obfuscated script execution. Automatically set to 5 s for PureVM scripts (no `loadstring`); 0 means unlimited. |
+| `--purevm_timeout=<number>` | `0` | Alias for `--max_bootstrap_seconds`. Use this to set how long (in seconds) to let a Luraph/PureVM script run before timing out. The timeout comment in the output shows how many VM opcodes were executed. |
 | `--saveFails=<bool>` | `false` | Write output after every operation (slow, but preserves partial results on crash). |
 | `--env_index=<bool>` | `false` | Emit a comment line for every unknown global read. |
 | `--outfile=<path>` | `out2.lua` | Path to write the deobfuscated output. |
@@ -115,6 +116,9 @@ lune hi.luau myscript.lua
 
 # Deobfuscate a Luraph-protected script (hookOp is auto-disabled for Luraph)
 lune hi.luau myscript.luau
+
+# Run a Luraph script for longer (default 5 s may not be enough for large scripts)
+lune hi.luau obfuscated.lua --purevm_timeout=30
 
 # Skip minification and write to a custom output file
 lune hi.luau myscript.lua --minifier=false --outfile=cleaned.lua
@@ -148,7 +152,7 @@ lune testing/prom/src/unparser.luau <input> <output> [<callId>] [<constantCollec
 | Generic Luau obfuscation (constant encoding, name mangling) | ✅ Supported |
 | MoonSec V3 (with anti-tamper) | ✅ Supported |
 | MoonSec V3 (with constant protection) | ⚠️ Partial – constants may be missing from output |
-| Luraph | ⚠️ Partial – hookOp is now **auto-disabled** for Luraph (PureVM detection); `debug.info` passes through; 30 s execution cap applied automatically. Roblox API calls made by the deobfuscated code are captured as spy output. Scripts whose deobfuscated payload contains an infinite game loop may need an OS-level timeout (`timeout 30 lune run hi.luau ...`). Full bytecode devirtualization is not yet implemented. |
+| Luraph | ⚠️ Partial – hookOp is **auto-disabled** for Luraph (PureVM detection); `debug.info` passes through; 5 s execution cap applied automatically. The timeout comment shows how many VM opcodes were executed (use `--purevm_timeout=<seconds>` to allow more time). Roblox API calls made by the deobfuscated payload are captured as spy output. Full bytecode devirtualization is not yet implemented. |
 | JayFuscator | ⚠️ WIP – output may trigger detection |
 
 ---
