@@ -58,6 +58,9 @@ RunSuite("parser.luau  (Luau recursive-descent parser)",
 RunSuite("unparser.luau  (AST-based source re-emitter)",
          "testing/prom/src/test_unparser.luau")
 
+RunSuite("hi.luau  (main deobfuscation engine)",
+         "testing/prom/src/test_hi.luau")
+
 -- ── Summary ───────────────────────────────────────────────────────────
 
 print(string.rep("═", 60))

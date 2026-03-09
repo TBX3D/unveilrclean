@@ -1,0 +1,8 @@
+# Lune obfuscation stdout log (written by Obf() on each successful run)
+Output.txt
+
+# Temporary files created by Obfuscate() during hookOp pre-processing
+temp/
+
+# Deobfuscated output (default output file for hi.luau)
+out2.lua
