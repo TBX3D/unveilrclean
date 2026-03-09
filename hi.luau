@@ -493,6 +493,10 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local PureVM = IsPureVMObfuscator
     local PureVMObfuscator = IsPureVMObfuscator
     local BootstrapStartedAt = Clock()
+    -- Set to true just before a CheckBootstrapTimeout error fires so the
+    -- result-handler below can distinguish our analysis timeout from any
+    -- real error thrown by the obfuscated script.
+    local BootstrapTimedOut = false
 
     -- PureVM obfuscators (e.g. Luraph without loadstring) have no transition
     -- point where the bootstrap ends.  Apply a default timeout and raise the
@@ -579,6 +583,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         end
 
         if Settings.max_bootstrap_seconds and Settings.max_bootstrap_seconds > 0 and Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
+            BootstrapTimedOut = true
             if ConcreteBootstrap then
                 error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
             else
@@ -2261,6 +2266,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         debug.sethook(function()
             if Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
                 debug.sethook()
+                BootstrapTimedOut = true
                 error(`PureVM execution timed out after {Settings.max_bootstrap_seconds}s. Partial output was saved.`, 0)
             end
         end, "", 10000)
@@ -2277,7 +2283,18 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local ReturnValue = ""
 
     if not SetfenvResult[1] then
-        ReturnValue = `error({Beautify(SetfenvResult[2])})`
+        local Err = SetfenvResult[2]
+        local ErrStr = Tostring(Err)
+        -- PureVM and ConcreteBootstrap timeouts are analysis limits imposed by
+        -- this tool, not errors in the obfuscated script itself. Emitting them
+        -- as a Luau comment keeps the output file valid and lets any spy output
+        -- captured above remain readable. All other execution failures keep the
+        -- error() form so the reconstructed script behaviour is accurate.
+        if BootstrapTimedOut then
+            ReturnValue = `-- [UnveilR] {ErrStr}`
+        else
+            ReturnValue = `error({Beautify(Err)})`
+        end
     else
         if #SetfenvResult > 1 then -- Ignoring the true, is there a return value?
             ReturnValue = "return "
