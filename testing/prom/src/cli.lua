@@ -25,7 +25,7 @@
 --* ── Output ────────────────────────────────────────────────────────────
 --*
 --*  The processed source is written to:
---*    • <input>.obfuscated.lua  (if the input path ends in .lua)
+--*    • <input>.obfuscated.lua  (if the input path ends in .lua or .luau)
 --*    • <input>.obfuscated.lua  (for any other extension)
 --*
 --* ── hookOp call-sites emitted ─────────────────────────────────────────
@@ -473,9 +473,12 @@ local function ParseArgs()
 end
 
 -- GetOutputPath: derive the output file path from the input path.
--- Strips a trailing .lua extension before appending .obfuscated.lua so
--- that `foo.lua` → `foo.obfuscated.lua` rather than `foo.lua.obfuscated.lua`.
+-- Strips a trailing .lua or .luau extension before appending .obfuscated.lua.
 local function GetOutputPath(Path)
+    if Path:match("%.luau$") then
+        return Path:gsub("%.luau$", "") .. ".obfuscated.lua"
+    end
+
     if Path:match("%.lua$") then
         return Path:gsub("%.lua$", "") .. ".obfuscated.lua"
     end
