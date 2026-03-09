@@ -93,7 +93,7 @@ The deobfuscated output is written to `out2.lua` (or the path set by
 
 | Flag | Default | Description |
 |---|---|---|
-| `--hookOp` | `true` | Inject CHECK* call-sites into every conditional before running. Automatically disabled for PureVM obfuscators (e.g. Luraph). Disable manually with `--hookOp=false` for other obfuscators that break under rewriting. |
+| `--hookOp` | `true` | Inject CHECK* call-sites into every conditional before running. **Automatically disabled** for PureVM obfuscators (e.g. Luraph) that embed their own interpreter and do not call `loadstring`. Override with `--hookOp=false` to force-disable manually. |
 | `--hookOpValue=spy\|<val>` | `spy` | Value spy proxies evaluate to inside hook-inserted expressions. |
 | `--explore_funcs=<bool>` | `true` | Decompile nested functions recursively. |
 | `--spy_exec_only=<bool>` | `true` | Only spy on known Roblox/executor globals; return nil for unknown names. |
@@ -102,6 +102,7 @@ The deobfuscated output is written to `out2.lua` (or the path set by
 | `--raw=<bool>` | `false` | Skip the hookOp pre-processing step entirely. |
 | `--max_ops=<number>` | `10500` | Hard cap on intercepted operations (prevents runaway scripts). |
 | `--max_while_count=<number>` | `100000` | Separate cap for while-loop iterations. |
+| `--max_bootstrap_seconds=<number>` | `0` (30 for PureVM) | Time limit in seconds for VM-obfuscated script execution. Automatically set to 30 s for PureVM scripts (no `loadstring`); 0 means unlimited. |
 | `--saveFails=<bool>` | `false` | Write output after every operation (slow, but preserves partial results on crash). |
 | `--env_index=<bool>` | `false` | Emit a comment line for every unknown global read. |
 | `--outfile=<path>` | `out2.lua` | Path to write the deobfuscated output. |
@@ -112,8 +113,8 @@ The deobfuscated output is written to `out2.lua` (or the path set by
 # Basic usage – deobfuscate a script with default settings
 lune hi.luau myscript.lua
 
-# Disable hookOp (automatically done for Luraph/PureVM, manual override for others)
-lune hi.luau myscript.lua --hookOp=false
+# Deobfuscate a Luraph-protected script (hookOp is auto-disabled for Luraph)
+lune hi.luau myscript.luau
 
 # Skip minification and write to a custom output file
 lune hi.luau myscript.lua --minifier=false --outfile=cleaned.lua
@@ -147,7 +148,7 @@ lune testing/prom/src/unparser.luau <input> <output> [<callId>] [<constantCollec
 | Generic Luau obfuscation (constant encoding, name mangling) | ✅ Supported |
 | MoonSec V3 (with anti-tamper) | ✅ Supported |
 | MoonSec V3 (with constant protection) | ⚠️ Partial – constants may be missing from output |
-| Luraph | ⚠️ Partial – PureVM mode auto-disables hookOp; for-loop hookOp rewriting is broken |
+| Luraph | ⚠️ Partial – hookOp is now **auto-disabled** for Luraph (PureVM detection); `debug.info` passes through; 30 s execution cap applied automatically. Roblox API calls made by the deobfuscated code are captured as spy output. Scripts whose deobfuscated payload contains an infinite game loop may need an OS-level timeout (`timeout 30 lune run hi.luau ...`). Full bytecode devirtualization is not yet implemented. |
 | JayFuscator | ⚠️ WIP – output may trigger detection |
 
 ---
