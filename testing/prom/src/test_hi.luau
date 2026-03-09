@@ -329,6 +329,26 @@ Test("obfuscated.lua: PureVM timeout appears as comment not error call", functio
     AssertNotContains(Output, 'error("PureVM execution timed out')
 end)
 
+-- Verify that the timeout comment includes the VM opcode count so users know
+-- how far the VM got.  The count is the number of pcall invocations which
+-- approximates the number of bytecode instructions dispatched.
+Test("obfuscated.lua: PureVM timeout comment includes VM opcode count", function()
+    local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", LuraphFlags)
+    Assert(Result.ok, "hi.luau exited with error: " .. Result.stderr)
+    -- The comment should mention "VM opcodes" so users can judge whether to
+    -- increase the timeout.
+    AssertContains(Output, "VM opcodes")
+end)
+
+-- Verify that --purevm_timeout is accepted as an alias for --max_bootstrap_seconds.
+-- When passed, the tool should complete within the given budget and produce
+-- output identical in structure to --max_bootstrap_seconds.
+Test("obfuscated.lua: --purevm_timeout alias is accepted", function()
+    local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", {"--hookOp=false", "--purevm_timeout=5"})
+    Assert(Result.ok, "hi.luau exited with error when using --purevm_timeout: " .. Result.stderr)
+    AssertContains(Output, "-- [UnveilR]")
+end)
+
 -- input.  If the VM dispatch table constants leak into the output, the
 -- deobfuscator is not intercepting properly.
 -- Note: "0X6614" uses uppercase X to match the exact literal in obfuscated.lua.
