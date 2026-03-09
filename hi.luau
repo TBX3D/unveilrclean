@@ -80,13 +80,18 @@
 --*               causes scripts to completely break (especially for-loops), so the tool
 --*               produces zero useful output for a huge share of real-world scripts.
 --*          Sub-steps:
---*            1. [EASY]   Disable hookOp, confirm luraph runs cleanly without it
---*            2. [EASY]   Isolate a minimal luraph for-loop snippet that reproduces the break
---*            3. [MEDIUM] Trace how hookOp rewrites numeric vs generic for-loops
---*            4. [MEDIUM] Identify which hookOp transformation(s) break luraph globally
---*            5. [MEDIUM] Fix for-loop rewrite in hookOp to preserve semantics
---*            6. [MEDIUM] Add a broader luraph-compatibility guard in the hookOp transform
---*            7. [MEDIUM] Test with the juju.lol luraph sample end-to-end
+--*            1. [DONE]   Detect PureVM / Luraph (IsLikelyVMObfuscator AND NOT HasDynamicLoader)
+--*                        and auto-disable hookOp in Obf() so the dispatch loop is preserved.
+--*            2. [DONE]   Pass debug.info through directly in Hooks.debug so Luraph's
+--*                        anti-tamper introspection returns real data instead of a spy proxy.
+--*            3. [DONE]   Extend CheckBootstrapTimeout and Locked.__index to apply a default
+--*                        30 s execution cap for PureVM scripts (IsPureVMObfuscator flag).
+--*            4. [EASY]   Isolate a minimal luraph for-loop snippet that reproduces the break
+--*            5. [MEDIUM] Trace how hookOp rewrites numeric vs generic for-loops
+--*            6. [MEDIUM] Identify which hookOp transformation(s) break luraph globally
+--*            7. [MEDIUM] Fix for-loop rewrite in hookOp to preserve semantics
+--*            8. [MEDIUM] Add a broader luraph-compatibility guard in the hookOp transform
+--*            9. [MEDIUM] Test with the juju.lol luraph sample end-to-end
 --*
 --* ── P2 · HIGH — misleading output on another major obfuscator ─────────
 --*
@@ -266,6 +271,9 @@ local Settings = {
     print_env_hits = false,
     print_spy_hits = false,
     max_spy_hits = 0,
+    -- 0 = disabled (no cap).  For PureVM obfuscators (Luraph-style, no loadstring)
+    -- this is automatically raised to 30 s so a stuck dispatch loop cannot run
+    -- forever.  Override with --max_bootstrap_seconds=<n>.
     max_bootstrap_seconds = 0
 }
 
@@ -459,8 +467,21 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local LoopHits = {}
     local EnvHits = {}
     local SpyHits = {}
+    -- IsPureVMObfuscator: true when the source looks like a VM obfuscator whose
+    -- interpreter loop is entirely self-contained (Luraph-style) – i.e. it never
+    -- calls loadstring / load() to load the deobfuscated payload.  For these
+    -- scripts hookOp's CHECKWHILE wrappers would kill the dispatch loop after
+    -- max_while_count iterations, producing no useful output.
+    local IsPureVMObfuscator = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source)
     local ConcreteBootstrap = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and HasDynamicLoader(Source)
     local BootstrapStartedAt = Clock()
+
+    -- Apply a default 30 s execution cap for PureVM scripts so that a looping
+    -- dispatch table does not run forever when the user has not explicitly set
+    -- --max_bootstrap_seconds.  The user can raise or lower it via the flag.
+    if IsPureVMObfuscator and Settings.max_bootstrap_seconds == 0 then
+        Settings.max_bootstrap_seconds = 30
+    end
 
     local function OpCountCheck()
         if OpCount >= Settings.max_ops then
@@ -517,12 +538,16 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     end
 
     local function CheckBootstrapTimeout()
-        if not ConcreteBootstrap then
+        if not ConcreteBootstrap and not IsPureVMObfuscator then
             return
         end
 
         if Settings.max_bootstrap_seconds and Settings.max_bootstrap_seconds > 0 and Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
-            error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
+            if ConcreteBootstrap then
+                error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
+            else
+                error(`PureVM execution timed out after {Settings.max_bootstrap_seconds}s. Partial output was saved.`, 0)
+            end
         end
     end
     --* ── Beautify ──────────────────────────────────────────────────────────
@@ -1415,11 +1440,14 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             return getmetatable(tbl)
         end,
         wait = function(a) return Spy(`wait({a})`) end,
-        pcall = pcall--[[function(f, ...)
-            local args = #({...})
-            --Append(`pcall(function()--cannot spy, this call has {args} argend)`)
+        -- For PureVM obfuscators (e.g. Luraph) the VM stores pcall at init time
+        -- as an upvalue.  Wrapping it here means every internal VM pcall also
+        -- triggers the time-based execution cap so the hook does not require
+        -- debug.sethook (which is unavailable in Lune 0.10).
+        pcall = function(f, ...)
+            if IsPureVMObfuscator then CheckBootstrapTimeout() end
             return pcall(f, ...)
-        end]],
+        end,
         setfenv = function(a, b) --> prevent env wiping
             if getmetatable(b) then return end --> we don't wanna override, do we?
             setfenv(a, Setmetatable(b, Locked))
@@ -1740,6 +1768,11 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
             return Concat(out, "\n")
         end,
+        -- Pass debug.info through to the real implementation.  VM obfuscators
+        -- (e.g. Luraph) call debug.info to read parameter/upvalue counts for
+        -- anti-tamper checks; returning a spy proxy would cause the VM to
+        -- malfunction before executing any deobfuscated code.
+        info = debug.info,
         setmetatable = Spy("debug.setmetatable"),
         P = "debug"
     }, {
@@ -1788,7 +1821,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     for _, i in Next, Funcs do Env[i] = TrueEnv[i] end
     for _, i in Next, Tables do Env[i] = TrueEnv[i] end
 
-    if ConcreteBootstrap then
+    if ConcreteBootstrap or IsPureVMObfuscator then
         Env.debug = TrueEnv.debug
     end
 
@@ -1956,8 +1989,15 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             __index = function(_, Key)
                 --print(Key)
 
-                OpCount += 1
-                OpCountCheck()
+                -- PureVM obfuscators (e.g. Luraph) run their entire interpreter loop
+                -- through this __index.  Counting every global read against max_ops
+                -- exhausts the budget within a handful of VM instructions, producing no
+                -- useful output.  Instead, rely solely on the time-based cap
+                -- (max_bootstrap_seconds) which is automatically set to 30 s for PureVM.
+                if not IsPureVMObfuscator then
+                    OpCount += 1
+                    OpCountCheck()
+                end
 
                 if Key == "_ENV" then return end
                 if Key == "getfenv" then return function() return Locked end end
@@ -1982,6 +2022,13 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                     end
 
                     return TrueEnv[Key]
+                end
+
+                -- PureVM obfuscators (e.g. Luraph) never call loadstring; their entire
+                -- interpreter runs transparently.  Apply the time-based execution cap so
+                -- a stuck VM loop doesn't run forever.
+                if IsPureVMObfuscator then
+                    CheckBootstrapTimeout()
                 end
 
                 TrackEnvHit(Key)
@@ -2036,6 +2083,14 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 OpCount += 1
 
                 OpCountCheck()
+
+                -- Also apply the PureVM time-based cap here so that scripts whose
+                -- dispatch loops write globals (rather than indexing them) are still
+                -- stopped when the deadline is reached.
+                if IsPureVMObfuscator then
+                    CheckBootstrapTimeout()
+                end
+
                 if Settings.spy_exec_only then return end
 
                 local IsFunc = Typeof(Value) == "function"
@@ -2072,7 +2127,32 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     end
 
     --SetfenvResult = table.pack(pcall(setfenv(Function, Locked), Unpack(Params)))
+
+    -- For PureVM obfuscators the dispatch loop never touches Locked, so the
+    -- CheckBootstrapTimeout() calls in __index/__newindex may not fire in time.
+    -- Install a Luau instruction-count hook (fires every 10 000 instructions)
+    -- that checks the wall-clock deadline and raises an error if exceeded.
+    -- Guarded with a nil-check because Lune 0.10 does not expose debug.sethook
+    -- (its debug table only contains debug.info and debug.traceback); when
+    -- unavailable the __index/__newindex clock checks and the Hooks.pcall
+    -- wrapper serve as fallbacks.
+    local PureVMHookActive = false
+    if IsPureVMObfuscator and Settings.max_bootstrap_seconds > 0 and debug.sethook then
+        debug.sethook(function()
+            if Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
+                debug.sethook()
+                error(`PureVM execution timed out after {Settings.max_bootstrap_seconds}s. Partial output was saved.`, 0)
+            end
+        end, "", 10000)
+        PureVMHookActive = true
+    end
+
     SetfenvResult = table.pack(pcall(setfenv(Function, Locked), Unpack(Params)))
+
+    -- Always clear the instruction hook after execution finishes (success or error).
+    if PureVMHookActive then
+        debug.sethook()
+    end
 
     local ReturnValue = ""
 
@@ -2397,6 +2477,18 @@ end
 function Obf(Path)
     local Source = FileSystem.read(Path)
 
+    -- FIX (PureVM / Luraph): Automatically disable hookOp when the source is a
+    -- VM obfuscator that embeds its own interpreter and never calls loadstring.
+    -- hookOp wraps every `while … do` with CHECKWHILE; after max_while_count
+    -- iterations CHECKWHILE returns false and terminates the dispatch loop,
+    -- producing zero useful output.  Disabling hookOp lets the loop run freely
+    -- while the spy still intercepts every global access made by the deobfuscated
+    -- bytecode.
+    if Settings.hookOp and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source) then
+        warn("PureVM obfuscator detected (no loadstring/load call). Automatically disabling --hookOp to preserve the VM dispatch loop.")
+        Settings.hookOp = false
+    end
+
     -- FIX: Use `lune run testing/prom/src/cli.lua` (the correct sub-command and
     -- relative path from the repo root).  The old invocation used `"cli.lua"` as
     -- the first positional argument to lune which lune 0.10+ rejects with
@@ -2434,9 +2526,9 @@ function Obf(Path)
         end
     end
 
-    -- FIX: Also check Out.ok so that a non-zero exit from the lune process
-    -- (e.g. script parse error, wrong sub-command) falls back to raw source
-    -- instead of trying to read a .obfuscated.lua file that was never written.
+    -- If Out.ok is false the lune process exited non-zero (e.g. script parse
+    -- error, wrong sub-command); fall back to raw source so we do not try to
+    -- read a .obfuscated.lua file that was never written.
     if not Success or not Out.ok then
         warn(`Skipping obfuscation: {Success and Out.stderr or Tostring(Out)}. Using raw source.`)
         return Source
@@ -2448,7 +2540,11 @@ function Obf(Path)
     local Splitted = Split(Path, ".")
     local OutPath = Path
 
-    if Splitted[#Splitted] == "lua" then
+    -- Strip the trailing .lua or .luau extension before appending .obfuscated.lua
+    -- so that foo.lua → foo.obfuscated.lua and foo.luau → foo.obfuscated.lua
+    -- (matching the path that cli.lua writes to).
+    local LastExt = Splitted[#Splitted]
+    if LastExt == "lua" or LastExt == "luau" then
         OutPath = Concat(Move(Splitted, 1, #Splitted - 1, 1, {}), ".")
     end
 
