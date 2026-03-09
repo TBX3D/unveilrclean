@@ -277,7 +277,7 @@ local Settings = {
     print_spy_hits = false,
     max_spy_hits = 0,
     -- 0 = disabled (no cap).  For PureVM obfuscators (Luraph-style, no loadstring)
-    -- this is automatically raised to 30 s so a stuck dispatch loop cannot run
+    -- this is automatically raised to 5 s so a stuck dispatch loop cannot run
     -- forever.  Override with --max_bootstrap_seconds=<n>.
     max_bootstrap_seconds = 0
 }
@@ -499,7 +499,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     -- operation cap so the VM can finish executing before we hit the limit.
     if IsPureVMObfuscator then
         if not Settings.max_bootstrap_seconds or Settings.max_bootstrap_seconds == 0 then
-            Settings.max_bootstrap_seconds = 30
+            Settings.max_bootstrap_seconds = 5
         end
         -- 10_500 is the default max_ops for normal scripts; raise it for
         -- PureVM since the VM interpreter generates far more operations.

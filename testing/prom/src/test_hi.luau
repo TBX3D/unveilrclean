@@ -309,10 +309,10 @@ end)
 
 -- Verify that PureVM auto-detection works without manually passing --hookOp=false.
 -- The Obf() function should detect the PureVM obfuscator and automatically disable
--- hookOp, so the tool should succeed even when hookOp is not explicitly disabled.
+-- hookOp, so the tool should succeed even when no flags are explicitly passed.
+-- The default PureVM timeout (5 s) is used so CI does not block.
 Test("obfuscated.lua: PureVM auto-detection disables hookOp automatically", function()
-    local AutoFlags = {"--max_bootstrap_seconds=5"}
-    local Result = RunHiFile(RepoRoot .. "/obfuscated.lua", AutoFlags)
+    local Result = RunHiFile(RepoRoot .. "/obfuscated.lua", {})
     Assert(Result.ok, "hi.luau exited with error when relying on PureVM auto-detection: " .. Result.stderr)
 end)
 
