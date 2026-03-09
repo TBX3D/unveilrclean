@@ -337,10 +337,10 @@ local Id, ExpressionId, ExpressionHooks = 0, 0, {}
 local OriginalSource
 
 local Success, T = pcall(function()
-    return require("../Libraries/Types.luau")
+    return require("../Libraries/Types")
 end)
 
-local Types = Success and T or require("./Libraries/Types.luau")
+local Types = Success and T or require("./Libraries/Types")
 
 -- GetActualPath: follow the Values chain to resolve aliased variable names.
 -- When variable A is defined as the value of variable B, reading A should
@@ -1121,6 +1121,12 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     end
 
     local function Obfuscate(Code)
+        -- Create the temp directory if it does not exist yet so that
+        -- fs.writeFile() below does not fail on a fresh clone of the repo.
+        if not fs.isDir("temp") then
+            fs.makeDir("temp")
+        end
+
         local File = "temp/" .. GenerateId(6)
 
         -- FIX (temporary limitation): Strip ALL leading whitespace (spaces, tabs,
@@ -2391,8 +2397,13 @@ end
 function Obf(Path)
     local Source = FileSystem.read(Path)
 
+    -- FIX: Use `lune run testing/prom/src/cli.lua` (the correct sub-command and
+    -- relative path from the repo root).  The old invocation used `"cli.lua"` as
+    -- the first positional argument to lune which lune 0.10+ rejects with
+    -- "unrecognized subcommand 'cli.lua'", causing the process to exit non-zero.
     local Args = {
-        "cli.lua",
+        "run",
+        "testing/prom/src/cli.lua",
         "--LuaU",
         "--preset", "Minify"
     }
@@ -2423,8 +2434,11 @@ function Obf(Path)
         end
     end
 
-    if not Success then
-        warn(`Skipping obfuscation: {Tostring(Out)}. Using raw source.`)
+    -- FIX: Also check Out.ok so that a non-zero exit from the lune process
+    -- (e.g. script parse error, wrong sub-command) falls back to raw source
+    -- instead of trying to read a .obfuscated.lua file that was never written.
+    if not Success or not Out.ok then
+        warn(`Skipping obfuscation: {Success and Out.stderr or Tostring(Out)}. Using raw source.`)
         return Source
     end
 
