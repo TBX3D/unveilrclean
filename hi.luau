@@ -460,6 +460,13 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local EnvHits = {}
     local SpyHits = {}
     local ConcreteBootstrap = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and HasDynamicLoader(Source)
+    -- PureVMObfuscator: a VM obfuscator whose entire payload is encoded inline
+    -- (e.g. Luraph) and that never calls loadstring from the sandboxed env.
+    -- For these scripts every global lookup is either an ExecEnv Roblox API call
+    -- (meaningful, should be intercepted) or a VM-internal lookup that returns nil
+    -- and should NOT exhaust max_ops.  Ops are only charged when the key resolves
+    -- to a spied ExecEnv global so the VM bootstrap does not burn the budget.
+    local PureVMObfuscator = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source)
     local BootstrapStartedAt = Clock()
 
     local function OpCountCheck()
@@ -516,13 +523,28 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         end
     end
 
+    -- Effective bootstrap timeout: honour the user-supplied max_bootstrap_seconds
+    -- when it is non-zero; otherwise default to 30 seconds when running in
+    -- PureVMObfuscator mode (no loadstring) so that a VM game-loop cannot spin
+    -- indefinitely.  ConcreteBootstrap scripts that call loadstring eventually
+    -- get intercepted, so they keep 0 (disabled) as their default.
+    local EffectiveBootstrapSeconds = Settings.max_bootstrap_seconds
+    if EffectiveBootstrapSeconds == 0 and PureVMObfuscator then
+        EffectiveBootstrapSeconds = 30
+    end
+
     local function CheckBootstrapTimeout()
-        if not ConcreteBootstrap then
+        if not ConcreteBootstrap and not PureVMObfuscator then
             return
         end
 
-        if Settings.max_bootstrap_seconds and Settings.max_bootstrap_seconds > 0 and Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
-            error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
+        if EffectiveBootstrapSeconds > 0 and Clock() - BootstrapStartedAt >= EffectiveBootstrapSeconds then
+            local OutFile = Settings.outfile or "out2.lua"
+            -- Write partial output synchronously so it is guaranteed to be saved
+            -- before the error propagates (task.spawn would race with Decode()'s
+            -- own synchronous write and potentially overwrite it).
+            fs.writeFile(OutFile, Concat(Output, "\n"))
+            error("VM execution timed out. Partial output saved. Raise --max_bootstrap_seconds if the script needs more time to reach Roblox API calls.", 0)
         end
     end
     --* ── Beautify ──────────────────────────────────────────────────────────
@@ -1724,6 +1746,36 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 end
             })
         end,
+        -- debug.info is the Luau-style introspection function (format-string based).
+        -- Obfuscators such as Luraph call debug.info(getmetatable, "slnaf") as an
+        -- anti-tamper check: if getmetatable is the real C function the source
+        -- field "s" comes back as "[C]"; a sandboxed Lua wrapper breaks this check.
+        -- This handler passes through to the real debug.info for any non-Spy target
+        -- so the check passes.  For Spy proxies (where a real call is impossible)
+        -- it synthesises a plausible "[C]"-source result and emits a comment.
+        info = function(f, opts)
+            local SpiedPath = IsInternal(f)
+            if SpiedPath then
+                Append(`-- debug.info was called on spy: {SpiedPath}`)
+                local ret = {}
+                for i = 1, #(opts or "") do
+                    local c = Sub(opts, i, i)
+                    if c == "s" then ret[#ret+1] = "[C]"         -- "s": source; C functions always show "[C]"
+                    elseif c == "l" then ret[#ret+1] = -1         -- "l": current line; -1 = unavailable for C
+                    elseif c == "n" then ret[#ret+1] = SpiedPath  -- "n": name; use the spy path as a stand-in
+                    elseif c == "a" then ret[#ret+1] = 0; ret[#ret+1] = false  -- "a": arity (0 params, not vararg)
+                    elseif c == "f" then ret[#ret+1] = f          -- "f": the function object itself
+                    end
+                end
+                return Unpack(ret)
+            end
+            -- Real function or stack-level number: pass through to the genuine
+            -- debug.info so anti-tamper checks on standard C globals return "[C]".
+            if Typeof(f) == "function" or Typeof(f) == "number" then
+                return debug.info(f, opts)
+            end
+            return nil
+        end,
         traceback = function(a)
             assert(not a or Typeof(a) == "string", "invalid argument #1 to 'traceback' (string expected got " .. Typeof(a) .. ")")
 
@@ -1790,6 +1842,19 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
     if ConcreteBootstrap then
         Env.debug = TrueEnv.debug
+    end
+
+    -- For pure VM obfuscators the entire execution is self-contained in Lua
+    -- closures that never touch the global env, so Locked.__index is rarely
+    -- called and the wall-clock timeout there cannot fire.  Luraph-style VMs
+    -- use pcall heavily for instruction dispatch: wrapping it gives us a
+    -- reliable hook to check the execution time limit on every VM cycle.
+    if PureVMObfuscator then
+        local BasePcall = Env["pcall"]
+        Env["pcall"] = CreateFunction(function(...)
+            CheckBootstrapTimeout()
+            return BasePcall(...)
+        end, "pcall")
     end
 
     local Task = Setmetatable({}, {
@@ -1956,12 +2021,9 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             __index = function(_, Key)
                 --print(Key)
 
-                OpCount += 1
-                OpCountCheck()
-
+                -- Fast-path special keys that must never count against max_ops.
                 if Key == "_ENV" then return end
                 if Key == "getfenv" then return function() return Locked end end
-
                 -- LIMITATION: When the obfuscated script uses a `x or loadstring` pattern,
                 -- hookOp emits `CHECKOR(x, loadstring)`.  CHECKOR special-cases the
                 -- "loadstring" path and returns Loadstring directly (see CHECKOR above),
@@ -1973,6 +2035,20 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 -- added as a safety net.
                 if Key == "loadstring" then return Loadstring end --! reason it might be nil sometimes is due to CHECKOR
                 if Key == "load" then return Load end
+
+                -- For pure VM obfuscators (Luraph et al.) only charge an op when
+                -- accessing a known Roblox/executor global.  Those are the accesses
+                -- that produce spy output; internal VM globals return nil and must
+                -- not exhaust max_ops during the bootstrap phase.
+                local IsExec = Find(ExecEnv, Key)
+                if not PureVMObfuscator or IsExec then
+                    OpCount += 1
+                    OpCountCheck()
+                else
+                    -- Non-ExecEnv access in PureVMObfuscator mode: check wall-clock
+                    -- time so a game-loop payload cannot spin indefinitely.
+                    CheckBootstrapTimeout()
+                end
 
                 if ConcreteBootstrap then
                     CheckBootstrapTimeout()
@@ -2000,8 +2076,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 local a = HasEnvValue and EnvValues[Key] or (Pristine and {TrueEnv[Key]} or nil)
                 local Indexed = Index(Key)
 
-                local IsExec = Find(ExecEnv, Key)
-
+                -- IsExec already computed at the top of this function.
                 if a or (Find({14, 13, 12}, #Key) and not IsExec) then return (a or {})[1] end
 
                 if Settings.env_index then
