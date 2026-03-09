@@ -309,14 +309,26 @@ end)
 
 -- Verify that PureVM auto-detection works without manually passing --hookOp=false.
 -- The Obf() function should detect the PureVM obfuscator and automatically disable
--- hookOp, so the tool should succeed even when hookOp is not explicitly disabled.
+-- hookOp, so the tool should succeed even when no flags are explicitly passed.
+-- The default PureVM timeout (5 s) is used so CI does not block.
 Test("obfuscated.lua: PureVM auto-detection disables hookOp automatically", function()
-    local AutoFlags = {"--max_bootstrap_seconds=5"}
-    local Result = RunHiFile(RepoRoot .. "/obfuscated.lua", AutoFlags)
+    local Result = RunHiFile(RepoRoot .. "/obfuscated.lua", {})
     Assert(Result.ok, "hi.luau exited with error when relying on PureVM auto-detection: " .. Result.stderr)
 end)
 
--- Verify that output does not contain raw obfuscated bytecode tables from the
+-- Verify that the PureVM timeout produces a comment in the output, not an
+-- error() call. The output must remain valid Luau and show any spy results
+-- that were captured before the timeout, so terminating with error() would
+-- be misleading (it implies the original script crashed, not that we timed out).
+Test("obfuscated.lua: PureVM timeout appears as comment not error call", function()
+    local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", LuraphFlags)
+    Assert(Result.ok, "hi.luau exited with error: " .. Result.stderr)
+    -- The timeout notice must appear somewhere in the output file.
+    AssertContains(Output, "-- [UnveilR]")
+    -- It must NOT appear as a Luau error() call.
+    AssertNotContains(Output, 'error("PureVM execution timed out')
+end)
+
 -- input.  If the VM dispatch table constants leak into the output, the
 -- deobfuscator is not intercepting properly.
 -- Note: "0X6614" uses uppercase X to match the exact literal in obfuscated.lua.
