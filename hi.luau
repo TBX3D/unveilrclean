@@ -409,8 +409,8 @@ local function IsLikelyVMObfuscator(Source)
 
     local Score = 0
 
-    -- Check for return({ opener – strip leading block comments first since
-    -- many VM obfuscators prepend ASCII art headers in --[[ … ]] blocks.
+    -- Check for return({ opener anywhere in the source (not just the start)
+    -- so that scripts with leading block-comment headers still match.
     if string.find(Source, "return({", 1, true) then Score += 1 end
     if string.find(Source, "string.pack", 1, true) then Score += 1 end
     if string.find(Source, "string.unpack", 1, true) then Score += 1 end
@@ -485,6 +485,8 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         if not Settings.max_bootstrap_seconds or Settings.max_bootstrap_seconds == 0 then
             Settings.max_bootstrap_seconds = 30
         end
+        -- 10_500 is the default max_ops for normal scripts; raise it for
+        -- PureVM since the VM interpreter generates far more operations.
         if Settings.max_ops <= 10_500 then
             Settings.max_ops = 500_000
         end
@@ -1831,6 +1833,10 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     -- would never hit CheckBootstrapTimeout().
     if PureVM then
         local PureVMCallCount = 0
+        -- Check the bootstrap timeout every N library calls.  Too low adds
+        -- overhead; too high delays timeout detection.  5000 is a balance
+        -- that fires roughly every few milliseconds of real VM work.
+        local TimeoutCheckInterval = 5000
         local function GuardedTable(RealTable, Name)
             return Setmetatable({}, {
                 __index = function(_, Key)
@@ -1838,7 +1844,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                     if Typeof(Fn) ~= "function" then return Fn end
                     return function(...)
                         PureVMCallCount += 1
-                        if PureVMCallCount % 5000 == 0 then
+                        if PureVMCallCount % TimeoutCheckInterval == 0 then
                             CheckBootstrapTimeout()
                         end
                         return Fn(...)
@@ -1850,6 +1856,8 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         end
         -- Wrap the hot-path libraries the VM relies on for its interpreter.
         Env.bit32  = GuardedTable(bit32, "bit32")
+        -- `bit` is a common alias for `bit32` used by some Roblox executor
+        -- environments; VM obfuscators may reference either name.
         Env.bit    = Env.bit32
         Env.string = GuardedTable(string, "string")
         Env.table  = GuardedTable(table, "table")
