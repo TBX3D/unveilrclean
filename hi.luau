@@ -489,6 +489,7 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     -- max_while_count iterations, producing no useful output.
     local IsPureVMObfuscator = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source)
     local ConcreteBootstrap = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and HasDynamicLoader(Source)
+    -- Legacy aliases: earlier iterations of PureVM support used different names.
     local PureVM = IsPureVMObfuscator
     local PureVMObfuscator = IsPureVMObfuscator
     local BootstrapStartedAt = Clock()
@@ -2145,12 +2146,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                     end
 
                     return nil
-                end
-
-                -- Apply the time-based execution cap so
-                -- a stuck VM loop doesn't run forever.
-                if IsPureVMObfuscator then
-                    CheckBootstrapTimeout()
                 end
 
                 TrackEnvHit(Key)

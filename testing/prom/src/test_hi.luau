@@ -319,6 +319,7 @@ end)
 -- Verify that output does not contain raw obfuscated bytecode tables from the
 -- input.  If the VM dispatch table constants leak into the output, the
 -- deobfuscator is not intercepting properly.
+-- Note: "0X6614" uses uppercase X to match the exact literal in obfuscated.lua.
 Test("obfuscated.lua: output does not contain raw VM dispatch patterns", function()
     local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", LuraphFlags)
     Assert(Result.ok, "hi.luau exited with error: " .. Result.stderr)
