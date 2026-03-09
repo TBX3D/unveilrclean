@@ -1487,9 +1487,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
         hookexpr = function(id, val)
             ExpressionHooks[id] = val
         end,
-        --[[rawget = function(a, b)
-
-        end,]]
         next = function(tbl, ...)
             --print("next called",tbl,...)
             if IsInternal(tbl) then
@@ -1793,12 +1790,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     -- This still does not intercept globals inside nested Lua closures that are
     -- called by the coroutine body — a complete fix requires deep setfenv of every
     -- reachable function in the coroutine's call graph, which is not feasible here.
-    --[[Hooks.coroutine = HookLib("coroutine", {
-        wrap = function(f)
-            return coroutine.wrap(setfenv(f, Locked))
-            --return Spy(AddVar("wrap", "coroutine", Beautify(f, CurrentIndent + 1), "__call"))
-        end
-    })]]
     Hooks.debug = Setmetatable({
         getinfo = function(thread)
             local SpiedPath = IsInternal(thread)
@@ -1822,40 +1813,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                     Append(`-- The script indexed debug.getinfo(...) with key '{Key}'.`)
                 end
             })
-        end,
-        -- PureVM obfuscators (e.g. Luraph) use debug.info internally to
-        -- introspect function arities and source locations.  Pass through to
-        -- the real debug.info so the VM's bootstrap logic works correctly.
-        info = DebugInfo,
-        -- debug.info is the Luau-style introspection function (format-string based).
-        -- Obfuscators such as Luraph call debug.info(getmetatable, "slnaf") as an
-        -- anti-tamper check: if getmetatable is the real C function the source
-        -- field "s" comes back as "[C]"; a sandboxed Lua wrapper breaks this check.
-        -- This handler passes through to the real debug.info for any non-Spy target
-        -- so the check passes.  For Spy proxies (where a real call is impossible)
-        -- it synthesises a plausible "[C]"-source result and emits a comment.
-        info = function(f, opts)
-            local SpiedPath = IsInternal(f)
-            if SpiedPath then
-                Append(`-- debug.info was called on spy: {SpiedPath}`)
-                local ret = {}
-                for i = 1, #(opts or "") do
-                    local c = Sub(opts, i, i)
-                    if c == "s" then ret[#ret+1] = "[C]"         -- "s": source; C functions always show "[C]"
-                    elseif c == "l" then ret[#ret+1] = -1         -- "l": current line; -1 = unavailable for C
-                    elseif c == "n" then ret[#ret+1] = SpiedPath  -- "n": name; use the spy path as a stand-in
-                    elseif c == "a" then ret[#ret+1] = 0; ret[#ret+1] = false  -- "a": arity (0 params, not vararg)
-                    elseif c == "f" then ret[#ret+1] = f          -- "f": the function object itself
-                    end
-                end
-                return Unpack(ret)
-            end
-            -- Real function or stack-level number: pass through to the genuine
-            -- debug.info so anti-tamper checks on standard C globals return "[C]".
-            if Typeof(f) == "function" or Typeof(f) == "number" then
-                return debug.info(f, opts)
-            end
-            return nil
         end,
         traceback = function(a)
             assert(not a or Typeof(a) == "string", "invalid argument #1 to 'traceback' (string expected got " .. Typeof(a) .. ")")
@@ -2401,16 +2358,6 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     local Out = ""
     local Replace = {}
 
-    --[[
-        The Process
-        Get 1 time use variable
-        Loop through ALL variables
-        If any of those are inside it, de-nest
-        And then replace that variable with the new value.
-
-        What about if it's multiline? - I dont know
-    ]]
-
     local function CaseInsensitive(A)local Out = ""; for _, Letter in Next, Split(A, "") do Out ..= `([{Upper(Letter)}{Lower(Letter)}])`end return Out end
 
     local function DecodeArgs(Str)
@@ -2806,14 +2753,6 @@ local function Decode(File)
         print("Deobfuscation error:", ErrMsg)
         Code = `-- deobfuscation error: {ErrMsg}\nerror({Beautify(Code)})`
     end
-
-    --[[local Metadata = {
-        time = `{os.date("%d/%m/%Y")} @ {os.date("%H:%M:%S")}`,
-        time_taken = End,
-        discord = "discord.gg/threaded",
-        opcount = GlobalOpCount,
-        maxops = Settings.max_ops
-    }]]
 
     local Metadata = {
         discord = "discord.gg/threaded",
