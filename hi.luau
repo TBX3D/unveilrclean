@@ -72,13 +72,18 @@
 --* [DONE] Fix max operations not always working (__newindex now calls OpCountCheck() properly)
 --* [DONE] Fix addresses for functions/tables (GetAddress now prefixes ALL known types)
 --* [DONE] Fix recursive tables (IsRecursive check in Beautify handles all cycle types)
+--* [DONE] Add PureVM obfuscator support (auto-disable hookOp, pass-through env,
+--*        debug.info, timeout, op-skip for PureVM scripts like Luraph without loadstring)
 --*
 --* ── P1 · CRITICAL — complete script breakage on a major obfuscator ────
 --*
---* [HARD]   Fix luraph not working with hookop + for-loop breakage
+--* [PARTIAL] Fix luraph not working with hookop + for-loop breakage
 --*          WHY: Luraph is one of the most-used Roblox obfuscators. hookOp currently
 --*               causes scripts to completely break (especially for-loops), so the tool
 --*               produces zero useful output for a huge share of real-world scripts.
+--*          PROGRESS: PureVM detection now auto-disables hookOp for Luraph scripts,
+--*               sidestepping the for-loop breakage entirely.  The hookOp rewrite
+--*               itself is still broken for for-loops if manually forced.
 --*          Sub-steps:
 --*            1. [DONE]   Detect PureVM / Luraph (IsLikelyVMObfuscator AND NOT HasDynamicLoader)
 --*                        and auto-disable hookOp in Obf() so the dispatch loop is preserved.
@@ -396,6 +401,9 @@ end
 --* Scores several signals and returns true only when 3 or more are present.
 --* HasDynamicLoader: returns true when the source contains a dynamic loader
 --* call (loadstring or a bare load() call), which VM obfuscators always use.
+--* IsPureVMObfuscator: returns true when the source looks like a VM
+--* obfuscator but does NOT contain loadstring/load – a "pure" VM that
+--* interprets bytecode directly without ever calling loadstring.
 local function IsLikelyVMObfuscator(Source)
     if Typeof(Source) ~= "string" then
         return false
@@ -409,11 +417,14 @@ local function IsLikelyVMObfuscator(Source)
 
     local Score = 0
 
-    if Match(Source, "^%s*return%(%{") then Score += 1 end
+    -- Check for return({ opener anywhere in the source (not just the start)
+    -- so that scripts with leading block-comment headers still match.
+    if string.find(Source, "return({", 1, true) then Score += 1 end
     if string.find(Source, "string.pack", 1, true) then Score += 1 end
     if string.find(Source, "string.unpack", 1, true) then Score += 1 end
     if string.find(Source, "coroutine.wrap", 1, true) then Score += 1 end
     if string.find(Source, "table.create", 1, true) then Score += 1 end
+    if string.find(Source, "bit32.", 1, true) then Score += 1 end
 
     return Score >= 3
 end
@@ -428,6 +439,10 @@ local function HasDynamicLoader(Source)
     end
 
     return Match(Source, "^%s*load%s*%(") ~= nil or Match(Source, "[^%w_]load%s*%(") ~= nil
+end
+
+local function IsPureVMObfuscator(Source)
+    return IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source)
 end
 
 --* ── Main ─────────────────────────────────────────────────────────────
@@ -474,6 +489,22 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     -- max_while_count iterations, producing no useful output.
     local IsPureVMObfuscator = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and not HasDynamicLoader(Source)
     local ConcreteBootstrap = Settings.spy_exec_only and IsLikelyVMObfuscator(Source) and HasDynamicLoader(Source)
+    local PureVM = Settings.spy_exec_only and IsPureVMObfuscator(Source)
+    local BootstrapStartedAt = Clock()
+
+    -- PureVM obfuscators (e.g. Luraph without loadstring) have no transition
+    -- point where the bootstrap ends.  Apply a default timeout and raise the
+    -- operation cap so the VM can finish executing before we hit the limit.
+    if PureVM then
+        if not Settings.max_bootstrap_seconds or Settings.max_bootstrap_seconds == 0 then
+            Settings.max_bootstrap_seconds = 30
+        end
+        -- 10_500 is the default max_ops for normal scripts; raise it for
+        -- PureVM since the VM interpreter generates far more operations.
+        if Settings.max_ops <= 10_500 then
+            Settings.max_ops = 500_000
+        end
+        print("PureVM obfuscator detected – hookOp disabled, bootstrap timeout set to", Settings.max_bootstrap_seconds, "s")
     -- PureVMObfuscator: a VM obfuscator whose entire payload is encoded inline
     -- (e.g. Luraph) and that never calls loadstring from the sandboxed env.
     -- For these scripts every global lookup is either an ExecEnv Roblox API call
@@ -555,11 +586,16 @@ local function Main(Source, NestCount, CurrentIndent, Original)
     end
 
     local function CheckBootstrapTimeout()
+        if not ConcreteBootstrap and not PureVM then
         if not ConcreteBootstrap and not IsPureVMObfuscator then
             return
         end
 
         if Settings.max_bootstrap_seconds and Settings.max_bootstrap_seconds > 0 and Clock() - BootstrapStartedAt >= Settings.max_bootstrap_seconds then
+            if PureVM then
+                error(`PureVM bootstrap timed out after {Settings.max_bootstrap_seconds}s. The VM interpreter is too slow to complete in Lune. Try increasing --max_bootstrap_seconds or use a VM-specific devirtualizer.`, 0)
+            else
+                error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
             if ConcreteBootstrap then
                 error("VM bootstrap timed out before reaching load/loadstring. This script likely needs a VM-specific devirtualizer.", 0)
             else
@@ -1769,6 +1805,10 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 end
             })
         end,
+        -- PureVM obfuscators (e.g. Luraph) use debug.info internally to
+        -- introspect function arities and source locations.  Pass through to
+        -- the real debug.info so the VM's bootstrap logic works correctly.
+        info = DebugInfo,
         -- debug.info is the Luau-style introspection function (format-string based).
         -- Obfuscators such as Luraph call debug.info(getmetatable, "slnaf") as an
         -- anti-tamper check: if getmetatable is the real C function the source
@@ -2049,6 +2089,11 @@ local function Main(Source, NestCount, CurrentIndent, Original)
             __index = function(_, Key)
                 --print(Key)
 
+                -- PureVM: only count operations for exec-global accesses (the
+                -- ones we actually spy on).  Non-exec accesses are the VM
+                -- bootstrap performing thousands of lookups which should not
+                -- consume the operation budget.
+                if not PureVM then
                 -- PureVM obfuscators (e.g. Luraph) run their entire interpreter loop
                 -- through this __index.  Counting every global read against max_ops
                 -- exhausts the budget within a handful of VM instructions, producing no
@@ -2097,6 +2142,32 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                     return TrueEnv[Key]
                 end
 
+                -- PureVM obfuscators run their own bytecode interpreter and
+                -- never call loadstring.  We let the VM access all non-exec
+                -- globals (bit32, string, coroutine, …) directly so it can
+                -- bootstrap, but Roblox API accesses (game, workspace, …) are
+                -- still intercepted via Spy so the output captures what the
+                -- original script was doing.
+                if PureVM then
+                    CheckBootstrapTimeout()
+
+                    if EnvValues[Key] ~= nil then
+                        return EnvValues[Key][1]
+                    end
+
+                    local IsExec = Find(ExecEnv, Key)
+                    if IsExec then
+                        OpCount += 1
+                        return Spy(Index(Key))
+                    end
+
+                    -- Non-exec key: pass through real environment so the VM
+                    -- can use standard library functions without interference.
+                    if TrueEnv[Key] ~= nil then
+                        return TrueEnv[Key]
+                    end
+
+                    return nil
                 -- PureVM obfuscators (e.g. Luraph) never call loadstring; their entire
                 -- interpreter runs transparently.  Apply the time-based execution cap so
                 -- a stuck VM loop doesn't run forever.
@@ -2151,6 +2222,10 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 --print("Newindex",Key,Value)
 
                 EnvValues[Key] = {Value}
+
+                -- PureVM: store the value but don't count it as an operation;
+                -- the VM writes many internal temporaries during bootstrap.
+                if PureVM then return end
 
                 OpCount += 1
 
@@ -2549,6 +2624,12 @@ end
 function Obf(Path)
     local Source = FileSystem.read(Path)
 
+    -- PureVM obfuscators break when hookOp rewrites their AST (the VM's
+    -- bytecode tables, for-loops and dispatch logic are not designed to
+    -- survive CHECKIF/CHECKWHILE injection).  Automatically skip hookOp
+    -- for these scripts so the user does not have to pass --hookOp=false.
+    if IsPureVMObfuscator(Source) then
+        return Source
     -- FIX (PureVM / Luraph): Automatically disable hookOp when the source is a
     -- VM obfuscator that embeds its own interpreter and never calls loadstring.
     -- hookOp wraps every `while … do` with CHECKWHILE; after max_while_count
