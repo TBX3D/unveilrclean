@@ -210,6 +210,58 @@ Test("hookOp mode: global index access appears in output", function()
     AssertContains(Output, "game.Players")
 end)
 
+-- ── Tests: example obfuscated.lua ────────────────────────────────────
+
+-- Run hi.luau against the repository's example obfuscated.lua script
+-- (a real Luraph-obfuscated file, all on one line) and verify that the
+-- tool completes and produces a valid output file with the UnveilR header.
+-- hookOp is disabled because Luraph scripts are incompatible with the
+-- hookOp rewriter (see README "Supported obfuscators").
+
+-- Run hi.luau on an existing file (not a source string) and return the
+-- process result plus the output file contents.  Cleans up the output file.
+local function RunHiFile(InputPath, ExtraArgs)
+    local OutputPath = "/tmp/hi_test_file_output.lua"
+    if fs.isFile(OutputPath) then fs.removeFile(OutputPath) end
+
+    local Args = {
+        "run",
+        "hi.luau",
+        InputPath,
+        "--outfile=" .. OutputPath,
+    }
+    for _, Arg in ExtraArgs or {} do
+        table.insert(Args, Arg)
+    end
+
+    local Result = process.exec("lune", Args, { cwd = RepoRoot })
+
+    local Output = ""
+    if fs.isFile(OutputPath) then
+        Output = fs.readFile(OutputPath)
+        fs.removeFile(OutputPath)
+    end
+
+    return Result, Output
+end
+
+Test("obfuscated.lua: tool exits successfully", function()
+    local Result = RunHiFile(RepoRoot .. "/obfuscated.lua", {"--hookOp=false"})
+    Assert(Result.ok, "hi.luau exited with error on obfuscated.lua: " .. Result.stderr)
+end)
+
+Test("obfuscated.lua: output file is created and non-empty", function()
+    local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", {"--hookOp=false"})
+    Assert(Result.ok, "hi.luau exited with error: " .. Result.stderr)
+    Assert(#Output > 0, "output file was empty for obfuscated.lua")
+end)
+
+Test("obfuscated.lua: output contains UnveilR metadata header", function()
+    local Result, Output = RunHiFile(RepoRoot .. "/obfuscated.lua", {"--hookOp=false"})
+    Assert(Result.ok, "hi.luau exited with error: " .. Result.stderr)
+    AssertContains(Output, "This file was generated with UnveilR")
+end)
+
 -- ── Summary ───────────────────────────────────────────────────────────
 
 print(string.format("\nhi.luau tests: %d passed, %d failed", Passed, Failed))
