@@ -93,7 +93,7 @@ The deobfuscated output is written to `out2.lua` (or the path set by
 
 | Flag | Default | Description |
 |---|---|---|
-| `--hookOp` | `true` | Inject CHECK* call-sites into every conditional before running. Disable with `--hookOp=false` for obfuscators that break under rewriting (e.g. Luraph). |
+| `--hookOp` | `true` | Inject CHECK* call-sites into every conditional before running. Automatically disabled for PureVM obfuscators (e.g. Luraph). Disable manually with `--hookOp=false` for other obfuscators that break under rewriting. |
 | `--hookOpValue=spy\|<val>` | `spy` | Value spy proxies evaluate to inside hook-inserted expressions. |
 | `--explore_funcs=<bool>` | `true` | Decompile nested functions recursively. |
 | `--spy_exec_only=<bool>` | `true` | Only spy on known Roblox/executor globals; return nil for unknown names. |
@@ -112,7 +112,7 @@ The deobfuscated output is written to `out2.lua` (or the path set by
 # Basic usage – deobfuscate a script with default settings
 lune hi.luau myscript.lua
 
-# Disable hookOp (required for Luraph-protected scripts)
+# Disable hookOp (automatically done for Luraph/PureVM, manual override for others)
 lune hi.luau myscript.lua --hookOp=false
 
 # Skip minification and write to a custom output file
@@ -147,7 +147,7 @@ lune testing/prom/src/unparser.luau <input> <output> [<callId>] [<constantCollec
 | Generic Luau obfuscation (constant encoding, name mangling) | ✅ Supported |
 | MoonSec V3 (with anti-tamper) | ✅ Supported |
 | MoonSec V3 (with constant protection) | ⚠️ Partial – constants may be missing from output |
-| Luraph | ⚠️ Partial – use `--hookOp=false`; for-loop hookOp rewriting is broken |
+| Luraph | ⚠️ Partial – PureVM mode auto-disables hookOp; for-loop hookOp rewriting is broken |
 | JayFuscator | ⚠️ WIP – output may trigger detection |
 
 ---
