@@ -2088,6 +2088,11 @@ local function Main(Source, NestCount, CurrentIndent, Original)
                 end
 
                 if Key == "_ENV" then return end
+                -- NOTE: getfenv is normally resolved via rawget (we rawset a
+                -- stable closure directly into Locked after it is created so
+                -- that VM anti-tamper reference-equality checks pass).  This
+                -- branch is a fallback for MoonSec/ConcreteBootstrap paths
+                -- where the rawset is not performed.
                 if Key == "getfenv" then return function() return Locked end end
                 -- LIMITATION: When the obfuscated script uses a `x or loadstring` pattern,
                 -- hookOp emits `CHECKOR(x, loadstring)`.  CHECKOR special-cases the
@@ -2247,6 +2252,25 @@ local function Main(Source, NestCount, CurrentIndent, Original)
 
         rawset(Locked, "P", "getfenv()")
         rawset(Locked, "V", Locked)
+
+        -- FIX: Provide a stable getfenv implementation so that VM anti-tamper
+        -- checks comparing `getfenv == storedRef` pass correctly.
+        --
+        -- Without this fix the __index handler at line 2091 creates a NEW
+        -- function object on every call to getfenv (because Lua allocates a
+        -- fresh closure each time the `function() return Locked end` literal is
+        -- evaluated).  Luraph-style obfuscators store a reference to getfenv at
+        -- startup and then periodically check that the stored reference is still
+        -- equal to the current value of getfenv.  Because a new closure ≠ the
+        -- original one, the equality check always fails, trapping the VM in an
+        -- infinite anti-tamper retry loop (~265 K iterations per second) and
+        -- preventing the inner script from ever executing.
+        --
+        -- By rawset-ing a single cached closure as the "getfenv" key we ensure
+        -- that every access—whether from the VM at start-up or from Luraph's
+        -- periodic check—returns the identical function object.
+        local _getfenvFn = function() return Locked end
+        rawset(Locked, "getfenv", _getfenvFn)
 
         Internal[Locked] = "getfenv()"
     end
